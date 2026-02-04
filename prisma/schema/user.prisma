@@ -1,0 +1,1043 @@
+// ╔══════════════════════════════════════════════════════════════════════════════╗
+// ║              USER.PRISMA - USER DOMAIN MODELS                                ║
+// ║                    Complete Beginner's Guide                                 ║
+// ╚══════════════════════════════════════════════════════════════════════════════╝
+//
+// 📚 WHAT IS THIS FILE?
+// ─────────────────────
+// This file defines the USER DOMAIN - all models related to user accounts:
+// - User      → Base authentication entity (email, password, role)
+// - Admin     → Admin profile (SUPER_ADMIN, ADMIN roles)
+// - Doctor    → Doctor profile with qualifications
+// - Patient   → Patient profile with health data link
+//
+// 📐 DESIGN PATTERN: SINGLE TABLE INHERITANCE (STI)
+// ──────────────────────────────────────────────────
+// We use a pattern where:
+// - One base "User" table handles authentication
+// - Separate profile tables extend with role-specific data
+//
+// RELATIONSHIP:
+//                    ┌──────────────┐
+//                    │     User     │ (authentication)
+//                    │  - email     │
+//                    │  - password  │
+//                    │  - role      │
+//                    └──────┬───────┘
+//           ┌───────────────┼───────────────┐
+//           │               │               │
+//           ▼               ▼               ▼
+//      ┌─────────┐    ┌──────────┐    ┌───────────┐
+//      │  Admin  │    │  Doctor  │    │  Patient  │
+//      │(profile)│    │(profile) │    │ (profile) │
+//      └─────────┘    └──────────┘    └───────────┘
+//
+// WHY THIS PATTERN?
+// ✅ One login system (User table handles auth)
+// ✅ Role-specific data in separate tables
+// ✅ Easy to add new roles (create new profile table)
+// ✅ No null columns (no empty "specialty" for patients)
+//
+// 📐 DESIGN PATTERN: EMAIL DENORMALIZATION
+// ─────────────────────────────────────────
+// Notice email is stored in BOTH User AND profile tables (Admin, Doctor, Patient).
+// This is intentional "denormalization" for performance:
+//
+// WITHOUT DENORMALIZATION (requires JOIN):
+// SELECT * FROM doctors d JOIN users u ON d.userId = u.id WHERE u.email = 'x';
+//
+// WITH DENORMALIZATION (direct query):
+// SELECT * FROM doctors WHERE email = 'x';
+//
+// TRADEOFF: Must update both when email changes (handled in service layer).
+//
+// 📐 DESIGN PATTERN: SOFT DELETE
+// ───────────────────────────────
+// All models have: isDeleted Boolean, deletedAt DateTime?
+//
+// HARD DELETE: DELETE FROM users WHERE id = 'x';  -- Data gone forever!
+// SOFT DELETE: UPDATE users SET isDeleted = true WHERE id = 'x';
+//
+// WHY SOFT DELETE?
+// ✅ Legal requirements (retain records for X years)
+// ✅ Audit trail (who was deleted when)
+// ✅ Undo capability (restore accidentally deleted)
+// ✅ Data analytics (include deleted in reports)
+//
+// IMPORTANT: Always filter by isDeleted in queries!
+// const users = await prisma.user.findMany({
+//   where: { isDeleted: false }  // ← Don't forget this!
+// });
+//
+// 📖 DOCUMENTATION:
+// - Prisma Models: https://www.prisma.io/docs/orm/prisma-schema/data-model/models
+// - Relations: https://www.prisma.io/docs/orm/prisma-schema/data-model/relations
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ┌──────────────────────────────────────────────────────────────────────────────┐
+// │                              USER MODEL                                      │
+// │              Base authentication entity for all users                        │
+// └──────────────────────────────────────────────────────────────────────────────┘
+//
+// PURPOSE:
+// The User model handles AUTHENTICATION - proving who someone is.
+// All users (admins, doctors, patients) have exactly one User record.
+//
+// WHAT IT STORES:
+// - Login credentials (email, password)
+// - Role (determines what they can do)
+// - Status (active, blocked, etc.)
+//
+// RELATIONSHIPS:
+// User 1──1 Admin   (if role is ADMIN or SUPER_ADMIN)
+// User 1──1 Doctor  (if role is DOCTOR)
+// User 1──1 Patient (if role is PATIENT)
+//
+// LOGIN FLOW:
+// 1. User enters email + password
+// 2. Query: SELECT * FROM users WHERE email = 'x'
+// 3. Verify password with bcrypt.compare()
+// 4. Check status !== BLOCKED
+// 5. Generate JWT token with user.id and user.role
+//
+/// User model - Base authentication entity
+/// Links to role-specific profiles via one-to-one relationships
+model User {
+  // ─────────────────────────────────────────────────────────────────────────────
+  // PRIMARY KEY: id
+  // ─────────────────────────────────────────────────────────────────────────────
+  // @id           → Marks this as the primary key
+  // @default      → Auto-generated value
+  // uuid(7)       → UUID version 7 (time-ordered UUID)
+  //
+  // WHY UUID v7?
+  // - Globally unique (no collisions across tables)
+  // - Time-ordered (sorts chronologically)
+  // - Better index performance than random UUIDs
+  // - No auto-increment security issues (can't guess IDs)
+  //
+  // EXAMPLE: 0192ed16-2c8c-7f4b-a3d7-e5b4c8f9a1d2
+  //          ↑ timestamp portion (sorted by time)
+  //
+  id String @id @default(uuid(7))
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // EMAIL: Unique identifier for login
+  // ─────────────────────────────────────────────────────────────────────────────
+  // @unique       → Only one user per email (database constraint)
+  // @db.VarChar(255) → PostgreSQL VARCHAR with 255 char limit
+  //
+  // WHY @unique?
+  // - Prevents duplicate accounts
+  // - Enables login by email
+  // - Database enforces uniqueness (even if code fails)
+  //
+  // WHY VarChar(255)?
+  // - Email RFC max is ~254 chars
+  // - Fixed max prevents gigantic emails
+  // - More efficient than unlimited TEXT
+  //
+  email String @unique @db.VarChar(255)
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // PASSWORD: Hashed password (NEVER store plain text!)
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Stored as bcrypt hash, not the actual password!
+  //
+  // BCRYPT HASH FORMAT:
+  // $2b$10$N9qo8uLOickgx2ZMRZoMye.IjqQBrkHx3LMnJnDAz1qnmP5qQvOx2
+  // ↑   ↑  ↑
+  // |   |  └─ Salt + Hash (always same length)
+  // |   └─ Cost factor (higher = slower = more secure)
+  // └─ Algorithm version
+  //
+  // NEVER DO THIS:
+  // const user = { password: 'plaintext123' };  // ❌ Security disaster!
+  //
+  // ALWAYS DO THIS:
+  // const hashedPassword = await bcrypt.hash('plaintext123', 10);
+  // const user = { password: hashedPassword };  // ✅ Safe
+  //
+  password String @db.VarChar(255)
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // ROLE: User's privilege level (from UserRole enum)
+  // ─────────────────────────────────────────────────────────────────────────────
+  // See enums.prisma for UserRole definition.
+  //
+  // Determines:
+  // - Which dashboard they see
+  // - What API endpoints they can access
+  // - Which profile table has their data
+  //
+  role UserRole
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // STATUS: Account state (from UserStatus enum)
+  // ─────────────────────────────────────────────────────────────────────────────
+  // @default(PENDING) → New accounts start as pending
+  //
+  // Workflow:
+  // PENDING → User verifies email → ACTIVE
+  // ACTIVE → Admin blocks user → BLOCKED
+  // ACTIVE → User deletes account → DELETED
+  //
+  status UserStatus @default(PENDING)
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // NEED PASSWORD CHANGE: Force password reset on first login
+  // ─────────────────────────────────────────────────────────────────────────────
+  // @default(true) → All new users must change password
+  //
+  // Use cases:
+  // - Admin creates account with temporary password
+  // - Password expired (if you implement expiry)
+  // - Security incident (force all users to change)
+  //
+  needPasswordChange Boolean @default(true)
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // AUDIT FIELDS: Track creation and modifications
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // createdAt:
+  // @default(now()) → Automatically set when record created
+  // Never changes after creation
+  //
+  // updatedAt:
+  // @updatedAt → Automatically updated on any field change
+  // Prisma handles this - you don't need to set it manually!
+  //
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // SOFT DELETE FIELDS
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // isDeleted: Flag for soft delete
+  // @default(false) → Records start as not deleted
+  //
+  // deletedAt: When the soft delete occurred
+  // Optional (null) until record is soft-deleted
+  //
+  // SOFT DELETE IMPLEMENTATION:
+  // await prisma.user.update({
+  //   where: { id },
+  //   data: {
+  //     isDeleted: true,
+  //     deletedAt: new Date()
+  //   }
+  // });
+  //
+  isDeleted Boolean   @default(false)
+  deletedAt DateTime?
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // RELATIONS: Links to role-specific profiles
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // These are ONE-TO-ONE optional relations.
+  // A User has AT MOST one of each (based on their role).
+  //
+  // The "?" means optional - a DOCTOR user won't have an Admin profile.
+  //
+  // QUERY EXAMPLE (include profile):
+  // const user = await prisma.user.findUnique({
+  //   where: { email: 'dr.smith@hospital.com' },
+  //   include: { doctor: true }  // Include doctor profile
+  // });
+  //
+  admin   Admin?
+  doctor  Doctor?
+  patient Patient?
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // INDEXES: Optimize query performance
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // WHAT IS AN INDEX?
+  // An index is like a book's index - helps find data faster.
+  // Without index: Scan all rows (slow)
+  // With index: Jump directly to matching rows (fast)
+  //
+  // @@index([email], map: "user_email_idx")
+  // - Creates index on email column
+  // - Named "user_email_idx" in database
+  // - Speeds up: WHERE email = 'x' queries
+  //
+  // @@index([role, status], map: "user_role_status_idx")
+  // - COMPOSITE index on role AND status
+  // - Speeds up: WHERE role = 'DOCTOR' AND status = 'ACTIVE'
+  //
+  // @@index([isDeleted], map: "user_deleted_idx")
+  // - Speeds up: WHERE isDeleted = false
+  // - Critical since most queries filter deleted records
+  //
+  // MAP NAMING CONVENTION:
+  // tablename_columnname_idx
+  //
+  @@index([email], map: "user_email_idx")
+  @@index([role, status], map: "user_role_status_idx")
+  @@index([isDeleted], map: "user_deleted_idx")
+  // ─────────────────────────────────────────────────────────────────────────────
+  // TABLE MAPPING: Custom table name in database
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // @@map("users")
+  // - Model is named "User" in Prisma (PascalCase)
+  // - Table is named "users" in PostgreSQL (snake_case plural)
+  //
+  // This follows SQL naming conventions while keeping
+  // Prisma code idiomatic.
+  //
+  @@map("users")
+}
+
+// ┌──────────────────────────────────────────────────────────────────────────────┐
+// │                             ADMIN MODEL                                      │
+// │              Profile for SUPER_ADMIN and ADMIN users                         │
+// └──────────────────────────────────────────────────────────────────────────────┘
+//
+// PURPOSE:
+// Stores admin-specific profile information.
+// Created when a user with role ADMIN or SUPER_ADMIN is registered.
+//
+// WHAT ADMINS DO:
+// - Manage doctors and patients
+// - View system reports
+// - Handle disputes
+// - System configuration (SUPER_ADMIN only)
+//
+/// Admin profile - Super Admin and Admin role details
+model Admin {
+  id String @id @default(uuid(7))
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // DENORMALIZED EMAIL
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Copied from User table for query performance.
+  // Must be kept in sync when email changes!
+  //
+  email String @unique @db.VarChar(255)
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // PROFILE INFORMATION
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // name: Full name for display
+  // @db.VarChar(100) → Max 100 characters
+  //
+  // profilePhoto: URL to profile image (optional)
+  // @db.VarChar(500) → URLs can be long
+  //
+  // contactNumber: Phone number (optional)
+  // @db.VarChar(20) → International format: +1-555-123-4567
+  //
+  name          String  @db.VarChar(100)
+  profilePhoto  String? @db.VarChar(500)
+  contactNumber String? @db.VarChar(20)
+
+  // Audit fields
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  isDeleted Boolean   @default(false)
+  deletedAt DateTime?
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // FOREIGN KEY: Links to User
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // userId: The User this profile belongs to
+  // @unique → One admin profile per user (enforces 1:1)
+  //
+  // user: The relation to User model
+  // @relation(fields: [userId], references: [id], onDelete: Cascade)
+  //
+  // RELATION BREAKDOWN:
+  // - fields: [userId]    → This model's foreign key column
+  // - references: [id]    → User model's primary key
+  // - onDelete: Cascade   → Delete admin when user deleted
+  //
+  // CASCADE MEANS:
+  // If User is deleted → Admin profile is AUTOMATICALLY deleted
+  // This maintains referential integrity (no orphan profiles)
+  //
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Indexes
+  @@index([email], map: "admin_email_idx")
+  @@index([userId], map: "admin_user_idx")
+  @@map("admins")
+}
+
+// ┌──────────────────────────────────────────────────────────────────────────────┐
+// │                            DOCTOR MODEL                                      │
+// │              Profile for healthcare providers                                │
+// └──────────────────────────────────────────────────────────────────────────────┘
+//
+// PURPOSE:
+// Stores doctor-specific professional information.
+// The most data-rich profile due to professional requirements.
+//
+// WHAT DOCTORS HAVE:
+// - Professional info (registration, qualifications)
+// - Availability (schedules)
+// - Specializations (many-to-many with Specialty)
+// - Ratings and reviews
+//
+// RELATIONSHIPS:
+// Doctor ──< DoctorSpecialty >── Specialty (many-to-many)
+// Doctor ──< DoctorSchedule >── Schedule (many-to-many)
+// Doctor ──< Appointment (one-to-many)
+// Doctor ──< Prescription (one-to-many)
+// Doctor ──< Review (one-to-many)
+//
+/// Doctor profile - Healthcare provider details
+model Doctor {
+  id String @id @default(uuid(7))
+
+  // Denormalized email for query performance
+  email String @unique @db.VarChar(255)
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // PERSONAL INFORMATION
+  // ─────────────────────────────────────────────────────────────────────────────
+  name          String  @db.VarChar(100)
+  profilePhoto  String? @db.VarChar(500)
+  contactNumber String  @db.VarChar(20) // Required for doctors
+  address       String? @db.VarChar(500)
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // PROFESSIONAL INFORMATION
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // registrationNumber: Medical license number
+  // @unique → Must be unique (verified by medical board)
+  // Used to verify doctor's credentials
+  //
+  // experience: Years of medical practice
+  // @db.SmallInt → PostgreSQL SMALLINT (-32,768 to 32,767)
+  // Saves space vs regular INT for small numbers
+  //
+  // appointmentFee: Cost per appointment
+  // Stored in SMALLEST CURRENCY UNIT (cents/paisa)
+  // $50.00 is stored as 5000
+  // This avoids floating-point precision issues
+  //
+  // qualification: Degrees and certifications
+  // Example: "MBBS, MD (Cardiology), FACC"
+  //
+  // currentWorkingPlace: Hospital or clinic name
+  //
+  // designation: Job title
+  // Example: "Senior Consultant Cardiologist"
+  //
+  // bio: Detailed professional bio (optional)
+  // @db.Text → Unlimited length text
+  //
+  registrationNumber  String  @unique @db.VarChar(50)
+  experience          Int     @default(0) @db.SmallInt
+  gender              Gender
+  appointmentFee      Int // Amount in smallest currency unit (cents/paisa)
+  qualification       String  @db.VarChar(255)
+  currentWorkingPlace String  @db.VarChar(255)
+  designation         String  @db.VarChar(100)
+  bio                 String? @db.Text
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // RATING STATISTICS (Denormalized)
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // WHY DENORMALIZE?
+  // Calculating average on every request is expensive:
+  // SELECT AVG(rating) FROM reviews WHERE doctorId = 'x';
+  //
+  // Instead, we store the pre-calculated value:
+  // - averageRating: Updated when new review added
+  // - totalReviews: Count of reviews
+  //
+  // UPDATE LOGIC (in review service):
+  // averageRating = ((averageRating * totalReviews) + newRating) / (totalReviews + 1)
+  // totalReviews = totalReviews + 1
+  //
+  averageRating Float @default(0)
+  totalReviews  Int   @default(0)
+
+  // Audit fields
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  isDeleted Boolean   @default(false)
+  deletedAt DateTime?
+
+  // Foreign key - links to User
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // RELATIONS
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // doctorSpecialties: Junction table for many-to-many with Specialty
+  // Example: Dr. Smith has [Cardiology, Internal Medicine]
+  //
+  // doctorSchedules: Junction table for many-to-many with Schedule
+  // Example: Available Mon 9-10am, Tue 2-3pm
+  //
+  // appointments: All appointments for this doctor
+  //
+  // prescriptions: All prescriptions written by this doctor
+  //
+  // reviews: All reviews received by this doctor
+  //
+  doctorSpecialties DoctorSpecialty[]
+  doctorSchedules   DoctorSchedule[]
+  appointments      Appointment[]
+  prescriptions     Prescription[]
+  reviews           Review[]
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // INDEXES
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // doctor_rating_idx with (sort: Desc):
+  // - Sorted index for "top rated doctors" queries
+  // - SELECT * FROM doctors ORDER BY averageRating DESC
+  //
+  @@index([email], map: "doctor_email_idx")
+  @@index([name], map: "doctor_name_idx")
+  @@index([registrationNumber], map: "doctor_reg_num_idx")
+  @@index([averageRating(sort: Desc)], map: "doctor_rating_idx")
+  @@index([isDeleted], map: "doctor_deleted_idx")
+  @@index([userId], map: "doctor_user_idx")
+  @@map("doctors")
+}
+
+// ┌──────────────────────────────────────────────────────────────────────────────┐
+// │                           PATIENT MODEL                                      │
+// │              Profile for healthcare consumers                                │
+// └──────────────────────────────────────────────────────────────────────────────┘
+//
+// PURPOSE:
+// Stores patient-specific profile information.
+// Linked to health data, medical reports, and appointments.
+//
+// RELATIONSHIPS:
+// Patient 1──1 PatientHealthData (optional - created on first health update)
+// Patient ──< MedicalReport (one-to-many - uploaded documents)
+// Patient ──< Appointment (one-to-many)
+// Patient ──< Prescription (one-to-many)
+// Patient ──< Review (one-to-many)
+//
+/// Patient profile - Healthcare consumer details
+model Patient {
+  id String @id @default(uuid(7))
+
+  // Denormalized email for query performance
+  email String @unique @db.VarChar(255)
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // PERSONAL INFORMATION
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Minimal required info - detailed health data is in PatientHealthData
+  //
+  name          String  @db.VarChar(100)
+  profilePhoto  String? @db.VarChar(500)
+  contactNumber String? @db.VarChar(20) // Optional for patients
+  address       String? @db.VarChar(500)
+
+  // Audit fields
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  isDeleted Boolean   @default(false)
+  deletedAt DateTime?
+
+  // Foreign key - links to User
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // RELATIONS
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // patientHealthData: Detailed health information (optional)
+  // Created when patient first updates health info
+  // Contains: blood group, allergies, medications, etc.
+  //
+  // medicalReport: Uploaded medical documents
+  // Lab results, X-rays, prescriptions from other doctors
+  //
+  // appointments: All booked appointments
+  //
+  // prescriptions: All prescriptions received
+  //
+  // reviews: Reviews submitted for doctors
+  //
+  patientHealthData PatientHealthData?
+  medicalReport     MedicalReport[]
+  appointments      Appointment[]
+  prescriptions     Prescription[]
+  reviews           Review[]
+
+  // Indexes
+  @@index([email], map: "patient_email_idx")
+  @@index([name], map: "patient_name_idx")
+  @@index([isDeleted], map: "patient_deleted_idx")
+  @@index([userId], map: "patient_user_idx")
+  @@map("patients")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// QUICK REFERENCE
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// CREATING A DOCTOR (with User):
+// const user = await prisma.user.create({
+//   data: {
+//     email: 'dr.smith@hospital.com',
+//     password: hashedPassword,
+//     role: UserRole.DOCTOR,
+//     status: UserStatus.ACTIVE,
+//     doctor: {                    // Create profile in same transaction
+//       create: {
+//         email: 'dr.smith@hospital.com',
+//         name: 'Dr. John Smith',
+//         registrationNumber: 'MED12345',
+//         // ... other fields
+//       }
+//     }
+//   },
+//   include: { doctor: true }     // Include profile in response
+// });
+//
+// FINDING USER WITH PROFILE:
+// const user = await prisma.user.findUnique({
+//   where: { email: 'dr.smith@hospital.com' },
+//   include: {
+//     doctor: {
+//       include: {
+//         doctorSpecialties: {
+//           include: { specialty: true }  // Include specialty details
+//         }
+//       }
+//     }
+//   }
+// });
+//
+// SOFT DELETE USER:
+// await prisma.user.update({
+//   where: { id: userId },
+//   data: {
+//     isDeleted: true,
+//     deletedAt: new Date(),
+//     status: UserStatus.DELETED
+//   }
+// });
+// ═══════════════════════════════════════════════════════════════════════════════// ╔══════════════════════════════════════════════════════════════════════════════╗
+// // ║            SPECIALTY.PRISMA - MEDICAL SPECIALIZATION SYSTEM                  ║
+// // ║                    Complete Beginner's Guide                                 ║
+// // ╚══════════════════════════════════════════════════════════════════════════════╝
+// //
+// // 📚 WHAT IS THIS FILE?
+// // ─────────────────────
+// // This file defines the SPECIALTY DOMAIN - medical specializations:
+// // - Specialty       → Medical specialty definitions (e.g., Cardiology, Neurology)
+// // - DoctorSpecialty → Junction table for Doctor-Specialty many-to-many
+// //
+// // 🎯 BUSINESS CONTEXT
+// // ───────────────────
+// // Medical specialties help patients find the right doctor:
+// //
+// //     ┌─────────────────────────────────────────────────────────────┐
+// //     │                    MEDICAL SPECIALTIES                      │
+// //     ├──────────────────┬──────────────────┬──────────────────────┤
+// //     │   Cardiology 💓  │   Neurology 🧠   │   Orthopedics 🦴    │
+// //     │   Heart/Blood    │   Brain/Nerves   │   Bones/Joints       │
+// //     ├──────────────────┼──────────────────┼──────────────────────┤
+// //     │   Pediatrics 👶  │  Dermatology 🩺  │   Psychiatry 🧘     │
+// //     │   Children       │   Skin           │   Mental Health      │
+// //     └──────────────────┴──────────────────┴──────────────────────┘
+// //
+// // USER JOURNEY:
+// // 1. Patient has heart problems → Searches "Cardiology"
+// // 2. System shows all cardiologists
+// // 3. Patient picks based on ratings, fees, availability
+// //
+// // 📐 DESIGN PATTERN: MANY-TO-MANY RELATIONSHIP
+// // ─────────────────────────────────────────────
+// // A doctor can have MULTIPLE specialties.
+// // A specialty can belong to MULTIPLE doctors.
+// //
+// //     Dr. Smith         Specialties        Dr. Jones
+// //     ┌─────────┐      ┌────────────┐      ┌─────────┐
+// //     │ Doctor  │──────│ Cardiology │──────│ Doctor  │
+// //     │  Smith  │      └────────────┘      │  Jones  │
+// //     │         │      ┌────────────┐      │         │
+// //     │         │──────│  Internal  │      │         │
+// //     │         │      │  Medicine  │      │         │
+// //     └─────────┘      └────────────┘      └─────────┘
+// //
+// // Dr. Smith: Cardiology + Internal Medicine
+// // Dr. Jones: Cardiology only
+// //
+// // DATABASE TABLES:
+// //
+// // doctors              doctor_specialties       specialties
+// // ┌────────────────┐   ┌────────────────────┐   ┌────────────────┐
+// // │ id             │   │ doctorId (FK)  ────────│ id             │
+// // │ name           │   │ specialtyId (FK) ──────│ title          │
+// // │ ...            │   │ createdAt          │   │ icon           │
+// // └────────────────┘   │ updatedAt          │   │ description    │
+// //                      └────────────────────┘   └────────────────┘
+// //
+// // WHY NOT PUT specialtyId DIRECTLY ON DOCTOR?
+// // ❌ Doctor can only have ONE specialty
+// // ❌ Can't track when specialty was added
+// // ❌ Harder to query "all cardiologists"
+// //
+// // WITH JUNCTION TABLE:
+// // ✅ Doctor can have multiple specialties
+// // ✅ Track when specialty was assigned (audit)
+// // ✅ Easy queries in both directions
+// //
+// // 📐 IMPLICIT VS EXPLICIT MANY-TO-MANY
+// // ────────────────────────────────────
+// // Prisma supports IMPLICIT many-to-many (auto junction table).
+// // We use EXPLICIT junction table because:
+// //
+// // IMPLICIT (Prisma manages junction):
+// // model Doctor {
+// //   specialties Specialty[]
+// // }
+// // model Specialty {
+// //   doctors Doctor[]
+// // }
+// // Prisma creates _DoctorToSpecialty automatically.
+// //
+// // EXPLICIT (We define junction table):
+// // model DoctorSpecialty {
+// //   doctorId String
+// //   specialtyId String
+// //   createdAt DateTime  // ← Extra fields!
+// //   updatedAt DateTime  // ← Extra fields!
+// // }
+// //
+// // WHY EXPLICIT?
+// // ✅ Audit fields (createdAt, updatedAt)
+// // ✅ Potential future fields (isPrimary, certificationDate)
+// // ✅ Full control over table/column names
+// // ✅ Explicit referential actions
+// //
+// // 📖 DOCUMENTATION:
+// // - Many-to-Many: https://www.prisma.io/docs/orm/prisma-schema/data-model/relations/many-to-many-relations
+// // - Junction Tables: https://www.prisma.io/docs/orm/prisma-schema/data-model/relations/many-to-many-relations#explicit-many-to-many-relations
+// // ═══════════════════════════════════════════════════════════════════════════════
+//
+// // ┌──────────────────────────────────────────────────────────────────────────────┐
+// // │                           SPECIALTY MODEL                                    │
+// // │              Medical specialty definitions                                   │
+// // └──────────────────────────────────────────────────────────────────────────────┘
+// //
+// // PURPOSE:
+// // Master list of medical specializations.
+// // Used for categorizing and filtering doctors.
+// //
+// // COMMON SPECIALTIES:
+// // - Cardiology: Heart and cardiovascular system
+// // - Neurology: Brain and nervous system
+// // - Orthopedics: Bones, joints, muscles
+// // - Pediatrics: Children's health
+// // - Dermatology: Skin conditions
+// // - Psychiatry: Mental health
+// // - Oncology: Cancer treatment
+// // - Gynecology: Women's health
+// // - Urology: Urinary tract and male reproductive
+// // - Ophthalmology: Eye care
+// //
+// /// Specialty - Medical specialty definition
+// /// Used for categorizing and filtering doctors
+// model Specialty {
+//   // ─────────────────────────────────────────────────────────────────────────────
+//   // PRIMARY KEY: UUID v7 (time-ordered)
+//   // ─────────────────────────────────────────────────────────────────────────────
+//   id String @id @default(uuid(7))
+//
+//   // ─────────────────────────────────────────────────────────────────────────────
+//   // TITLE: Specialty name (unique)
+//   // ─────────────────────────────────────────────────────────────────────────────
+//   //
+//   // @unique → Only one specialty per title
+//   // @db.VarChar(100) → Max 100 characters
+//   //
+//   // WHY UNIQUE?
+//   // - Prevent duplicate specialties
+//   // - Enable lookup by title: findUnique({ where: { title: 'Cardiology' } })
+//   //
+//   // EXAMPLES:
+//   // - "Cardiology"
+//   // - "Internal Medicine"
+//   // - "Pediatric Cardiology" (subspecialty)
+//   //
+//   title String @unique @db.VarChar(100)
+//
+//   // ─────────────────────────────────────────────────────────────────────────────
+//   // ICON: Visual representation (optional)
+//   // ─────────────────────────────────────────────────────────────────────────────
+//   //
+//   // URL to specialty icon for UI display.
+//   // Can be:
+//   // - CDN URL: https://cdn.example.com/icons/cardiology.svg
+//   // - Local path: /icons/cardiology.svg
+//   // - Icon library name: "heart-pulse" (if using icon library)
+//   //
+//   icon String? @db.VarChar(255)
+//
+//   // ─────────────────────────────────────────────────────────────────────────────
+//   // DESCRIPTION: Detailed explanation (optional)
+//   // ─────────────────────────────────────────────────────────────────────────────
+//   //
+//   // @db.Text → Unlimited length
+//   //
+//   // PURPOSE:
+//   // Help patients understand what this specialty treats.
+//   //
+//   // EXAMPLE for Cardiology:
+//   // "Cardiology is a branch of medicine dealing with disorders of the
+//   //  heart and cardiovascular system. Cardiologists diagnose and treat
+//   //  conditions such as coronary artery disease, heart failure,
+//   //  arrhythmias, and congenital heart defects."
+//   //
+//   description String? @db.Text
+//
+//   // ─────────────────────────────────────────────────────────────────────────────
+//   // AUDIT FIELDS
+//   // ─────────────────────────────────────────────────────────────────────────────
+//   createdAt DateTime  @default(now())
+//   updatedAt DateTime  @updatedAt
+//   isDeleted Boolean   @default(false)
+//   deletedAt DateTime?
+//
+//   // ─────────────────────────────────────────────────────────────────────────────
+//   // RELATIONS
+//   // ─────────────────────────────────────────────────────────────────────────────
+//   //
+//   // doctorSpecialties: All doctor-specialty links
+//   // Through this, we can get all doctors with this specialty
+//   //
+//   // QUERY: Find all cardiologists
+//   // const cardiologists = await prisma.specialty.findUnique({
+//   //   where: { title: 'Cardiology' },
+//   //   include: {
+//   //     doctorSpecialties: {
+//   //       include: { doctor: true }
+//   //     }
+//   //   }
+//   // });
+//   //
+//   doctorSpecialties DoctorSpecialty[]
+//
+//   // ─────────────────────────────────────────────────────────────────────────────
+//   // INDEXES
+//   // ─────────────────────────────────────────────────────────────────────────────
+//   //
+//   // specialty_title_idx:
+//   // - Speeds up title searches
+//   // - Note: @unique already creates an index, this is explicit for clarity
+//   //
+//   // specialty_deleted_idx:
+//   // - For soft delete filtering
+//   //
+//   @@index([title], map: "specialty_title_idx")
+//   @@index([isDeleted], map: "specialty_deleted_idx")
+//   // Table mapping: Prisma "Specialty" → PostgreSQL "specialties"
+//   @@map("specialties")
+// }
+//
+// // ┌──────────────────────────────────────────────────────────────────────────────┐
+// // │                        DOCTORSPECIALTY MODEL                                 │
+// // │              Junction table for Doctor-Specialty relationship                │
+// // └──────────────────────────────────────────────────────────────────────────────┘
+// //
+// // PURPOSE:
+// // Links doctors to their medical specializations.
+// // Enables many-to-many relationship with audit trail.
+// //
+// // COMPOSITE PRIMARY KEY:
+// // Primary key is (doctorId + specialtyId) together.
+// // This automatically prevents duplicate assignments.
+// //
+// // USE CASES:
+// // ─────────
+// // 1. "Assign specialty to doctor"
+// //    → Insert into DoctorSpecialty
+// //
+// // 2. "Remove specialty from doctor"
+// //    → Delete from DoctorSpecialty
+// //
+// // 3. "Get all doctors with Cardiology specialty"
+// //    → Query DoctorSpecialty WHERE specialtyId = <cardiology_id>
+// //
+// // 4. "Get all specialties for Dr. Smith"
+// //    → Query DoctorSpecialty WHERE doctorId = <dr_smith_id>
+// //
+// /// DoctorSpecialty - Junction table for Doctor-Specialty relationship
+// /// Links doctors to their medical specializations
+// model DoctorSpecialty {
+//   // ─────────────────────────────────────────────────────────────────────────────
+//   // COMPOSITE PRIMARY KEY FIELDS
+//   // ─────────────────────────────────────────────────────────────────────────────
+//   //
+//   // Together, these form the primary key: @@id([doctorId, specialtyId])
+//   //
+//   // WHAT THIS PREVENTS:
+//   // - Same doctor having same specialty twice
+//   // - Example: Dr. Smith can't have "Cardiology" assigned twice
+//   //
+//   doctorId    String
+//   specialtyId String
+//
+//   // ─────────────────────────────────────────────────────────────────────────────
+//   // AUDIT FIELDS
+//   // ─────────────────────────────────────────────────────────────────────────────
+//   //
+//   // WHY AUDIT FIELDS ON JUNCTION TABLE?
+//   // - Track when specialty was assigned to doctor
+//   // - Useful for: "When did Dr. Smith become a cardiologist?"
+//   // - Analytics: "How many doctors added Dermatology this year?"
+//   //
+//   // POTENTIAL FUTURE FIELDS:
+//   // - isPrimary Boolean    → Is this the doctor's main specialty?
+//   // - certifiedAt DateTime → When was certification verified?
+//   // - expiresAt DateTime   → When does certification expire?
+//   //
+//   createdAt DateTime @default(now())
+//   updatedAt DateTime @updatedAt
+//
+//   // ─────────────────────────────────────────────────────────────────────────────
+//   // RELATIONS WITH REFERENTIAL ACTIONS
+//   // ─────────────────────────────────────────────────────────────────────────────
+//   //
+//   // onDelete: Cascade
+//   // - If doctor deleted → Remove all their specialty links
+//   // - If specialty deleted → Remove from all doctors
+//   //
+//   // onUpdate: Cascade
+//   // - If doctor.id changes → Update here automatically
+//   // - If specialty.id changes → Update here automatically
+//   //
+//   // WHY CASCADE?
+//   // Maintains referential integrity.
+//   // No orphan records pointing to deleted entities.
+//   //
+//   doctor    Doctor    @relation(fields: [doctorId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+//   specialty Specialty @relation(fields: [specialtyId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+//
+//   // ─────────────────────────────────────────────────────────────────────────────
+//   // COMPOSITE PRIMARY KEY
+//   // ─────────────────────────────────────────────────────────────────────────────
+//   //
+//   // @@id([doctorId, specialtyId])
+//   //
+//   // IN SQL:
+//   // CREATE TABLE doctor_specialties (
+//   //   doctor_id UUID NOT NULL,
+//   //   specialty_id UUID NOT NULL,
+//   //   created_at TIMESTAMP,
+//   //   updated_at TIMESTAMP,
+//   //   PRIMARY KEY (doctor_id, specialty_id)  ← Composite!
+//   // );
+//   //
+//   // PRISMA QUERY WITH COMPOSITE KEY:
+//   // await prisma.doctorSpecialty.delete({
+//   //   where: {
+//   //     doctorId_specialtyId: {     // ← Special compound key syntax
+//   //       doctorId: 'doctor_123',
+//   //       specialtyId: 'specialty_456'
+//   //     }
+//   //   }
+//   // });
+//   //
+//   @@id([doctorId, specialtyId])
+//   // ─────────────────────────────────────────────────────────────────────────────
+//   // INDEXES
+//   // ─────────────────────────────────────────────────────────────────────────────
+//   //
+//   // doctor_specialty_spec_idx:
+//   // - Index on specialtyId alone
+//   // - Speeds up: "Find all doctors with Cardiology"
+//   // - Query: WHERE specialtyId = 'cardiology_id'
+//   //
+//   // NOTE: doctorId is already indexed as part of primary key,
+//   // so we don't need a separate index for "Find all specialties for doctor X"
+//   //
+//   @@index([specialtyId], map: "doctor_specialty_spec_idx")
+//   // Table mapping
+//   @@map("doctor_specialties")
+// }
+//
+// // ═══════════════════════════════════════════════════════════════════════════════
+// // QUICK REFERENCE: WORKING WITH SPECIALTIES
+// // ═══════════════════════════════════════════════════════════════════════════════
+// //
+// // CREATING A SPECIALTY:
+// // const specialty = await prisma.specialty.create({
+// //   data: {
+// //     title: 'Cardiology',
+// //     icon: '/icons/heart.svg',
+// //     description: 'Heart and cardiovascular system...'
+// //   }
+// // });
+// //
+// // ASSIGNING SPECIALTY TO DOCTOR:
+// // await prisma.doctorSpecialty.create({
+// //   data: {
+// //     doctorId: 'doctor_123',
+// //     specialtyId: 'specialty_456'
+// //   }
+// // });
+// //
+// // FIND ALL DOCTORS WITH A SPECIALTY:
+// // const cardiologists = await prisma.doctor.findMany({
+// //   where: {
+// //     isDeleted: false,
+// //     doctorSpecialties: {
+// //       some: {
+// //         specialty: {
+// //           title: 'Cardiology'
+// //         }
+// //       }
+// //     }
+// //   },
+// //   include: {
+// //     doctorSpecialties: {
+// //       include: { specialty: true }
+// //     }
+// //   }
+// // });
+// //
+// // FIND ALL SPECIALTIES FOR A DOCTOR:
+// // const doctorWithSpecialties = await prisma.doctor.findUnique({
+// //   where: { id: 'doctor_123' },
+// //   include: {
+// //     doctorSpecialties: {
+// //       include: { specialty: true }
+// //     }
+// //   }
+// // });
+// //
+// // // Access specialties:
+// // const specialtyNames = doctorWithSpecialties.doctorSpecialties
+// //   .map(ds => ds.specialty.title);
+// // // ['Cardiology', 'Internal Medicine']
+// //
+// // REMOVE SPECIALTY FROM DOCTOR:
+// // await prisma.doctorSpecialty.delete({
+// //   where: {
+// //     doctorId_specialtyId: {
+// //       doctorId: 'doctor_123',
+// //       specialtyId: 'specialty_456'
+// //     }
+// //   }
+// // });
+// // ═══════════════════════════════════════════════════════════════════════════════

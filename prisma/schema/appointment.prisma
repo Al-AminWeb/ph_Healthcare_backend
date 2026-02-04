@@ -1,0 +1,863 @@
+// ╔══════════════════════════════════════════════════════════════════════════════╗
+// ║           APPOINTMENT.PRISMA - APPOINTMENT LIFECYCLE SYSTEM                  ║
+// ║                    Complete Beginner's Guide                                 ║
+// ╚══════════════════════════════════════════════════════════════════════════════╝
+//
+// 📚 WHAT IS THIS FILE?
+// ─────────────────────
+// This file defines the APPOINTMENT DOMAIN - the core business flow:
+// - Appointment  → Core booking entity (patient + doctor + schedule)
+// - Payment      → Financial transaction (1:1 with Appointment)
+// - Prescription → Medical instructions after visit (1:1 with Appointment)
+// - Review       → Patient feedback (1:1 with Appointment)
+//
+// 🎯 BUSINESS CONTEXT: THE APPOINTMENT LIFECYCLE
+// ───────────────────────────────────────────────
+//
+//     ┌─────────────────────────────────────────────────────────────────────┐
+//     │                    APPOINTMENT JOURNEY                              │
+//     └─────────────────────────────────────────────────────────────────────┘
+//
+//     PATIENT                         SYSTEM                        DOCTOR
+//        │                              │                              │
+//        │ 1. Search doctors            │                              │
+//        │ ─────────────────────────────>                              │
+//        │                              │                              │
+//        │ 2. Select time slot          │                              │
+//        │ ─────────────────────────────>                              │
+//        │                              │                              │
+//        │ 3. Pay appointment fee       │                              │
+//        │ ─────────────────────────────>                              │
+//        │                              │ 4. Notify doctor             │
+//        │                              │ ─────────────────────────────>
+//        │                              │                              │
+//        │                              │ 5. Appointment day arrives   │
+//        │<──────────────────────────────────────────────────────────── │
+//        │                              │                              │
+//        │ 6. Video consultation        │                              │
+//        │<─────────────────────────────────────────────────────────────>
+//        │                              │                              │
+//        │                              │ 7. Write prescription        │
+//        │                              │<─────────────────────────────│
+//        │                              │                              │
+//        │ 8. Leave review              │                              │
+//        │──────────────────────────────>                              │
+//        │                              │                              │
+//
+// 📐 DATABASE RELATIONSHIPS
+// ─────────────────────────
+//
+//     Patient ──────────< Appointment >──────────── Doctor
+//                              │
+//              ┌───────────────┼───────────────┬───────────────┐
+//              │               │               │               │
+//              ▼               ▼               ▼               ▼
+//           Payment      Prescription      Review         Schedule
+//           (1:1)           (1:1)          (1:1)           (1:1)
+//
+// WHY 1:1 RELATIONSHIPS?
+// - Each appointment has EXACTLY one payment
+// - Each appointment has AT MOST one prescription (created after visit)
+// - Each appointment has AT MOST one review (optional)
+// - Each appointment uses EXACTLY one schedule slot
+//
+// 📐 DESIGN PATTERN: STATUS-BASED WORKFLOW
+// ─────────────────────────────────────────
+// We use enum statuses to track appointment lifecycle:
+//
+//     AppointmentStatus Lifecycle:
+//     ┌──────────────────────────────────────────────────────────────────┐
+//     │ SCHEDULED ──> IN_PROGRESS ──> COMPLETED                         │
+//     │     │                              │                             │
+//     │     ▼                              ▼                             │
+//     │ CANCELLED                    (can write prescription)           │
+//     └──────────────────────────────────────────────────────────────────┘
+//
+//     PaymentStatus Lifecycle:
+//     ┌──────────────────────────────────────────────────────────────────┐
+//     │ UNPAID ──> PAID ──> REFUNDED                                    │
+//     │    │                                                            │
+//     │    ▼                                                            │
+//     │ (can't proceed to appointment)                                  │
+//     └──────────────────────────────────────────────────────────────────┘
+//
+// 📐 DESIGN PATTERN: DENORMALIZED paymentStatus
+// ──────────────────────────────────────────────
+// Notice Appointment has its own paymentStatus field.
+// This is DENORMALIZED from Payment.status.
+//
+// WITHOUT DENORMALIZATION:
+// SELECT * FROM appointments a
+// JOIN payments p ON p.appointmentId = a.id
+// WHERE p.status = 'PAID';
+//
+// WITH DENORMALIZATION:
+// SELECT * FROM appointments WHERE paymentStatus = 'PAID';
+//
+// TRADE-OFF:
+// ✅ Faster queries (no JOIN)
+// ✅ Simpler filtering logic
+// ❌ Must keep in sync with Payment.status
+//
+// 📖 DOCUMENTATION:
+// - One-to-One Relations: https://www.prisma.io/docs/orm/prisma-schema/data-model/relations/one-to-one-relations
+// - Referential Actions: https://www.prisma.io/docs/orm/prisma-schema/data-model/relations/referential-actions
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ┌──────────────────────────────────────────────────────────────────────────────┐
+// │                          APPOINTMENT MODEL                                   │
+// │              Core booking entity linking patients with doctors               │
+// └──────────────────────────────────────────────────────────────────────────────┘
+//
+// PURPOSE:
+// The central entity of the healthcare system.
+// Links patients with doctors at specific time slots.
+//
+// WHAT IT TRACKS:
+// - Who: patientId, doctorId
+// - When: scheduleId (links to time slot)
+// - Status: scheduled, in-progress, completed, cancelled
+// - Video: videoCallingId for telemedicine
+// - Payment: denormalized paymentStatus for quick filtering
+//
+/// Appointment - Core booking entity linking patients with doctors
+/// Each appointment is tied to a specific schedule slot
+model Appointment {
+  // ─────────────────────────────────────────────────────────────────────────────
+  // PRIMARY KEY: UUID v7 (time-ordered)
+  // ─────────────────────────────────────────────────────────────────────────────
+  id String @id @default(uuid(7))
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // VIDEO CALLING ID: For telemedicine appointments
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // Stores the ID for video call services (Zoom, Twilio, etc.)
+  // Generated when appointment is created or when video session starts.
+  //
+  // EXAMPLE VALUES:
+  // - Twilio: "RM1234567890abcdef..."
+  // - Zoom: "85642143567"
+  // - Custom: UUID
+  //
+  // Optional because:
+  // - Not all appointments are video (some in-person)
+  // - Generated after booking confirmation
+  //
+  videoCallingId String? @db.VarChar(100)
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // STATUS: Appointment lifecycle state
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // @default(SCHEDULED) → New appointments start as scheduled
+  //
+  // STATE MACHINE:
+  // ┌────────────┐     start      ┌─────────────┐     end      ┌───────────┐
+  // │ SCHEDULED  │ ─────────────> │ IN_PROGRESS │ ───────────> │ COMPLETED │
+  // └────────────┘                └─────────────┘              └───────────┘
+  //       │
+  //       │ cancel
+  //       ▼
+  // ┌────────────┐
+  // │ CANCELLED  │
+  // └────────────┘
+  //
+  // BUSINESS RULES:
+  // - SCHEDULED: Can be cancelled, can start video call
+  // - IN_PROGRESS: Video call active, cannot cancel
+  // - COMPLETED: Can write prescription, can submit review
+  // - CANCELLED: Terminal state, triggers refund
+  //
+  status AppointmentStatus @default(SCHEDULED)
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // PAYMENT STATUS: Denormalized from Payment table
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // @default(UNPAID) → New appointments start unpaid
+  //
+  // WHY DENORMALIZE?
+  // Common query: "Show all paid appointments"
+  // Without denormalization: Need to JOIN with payments table
+  // With denormalization: Direct filter on appointments
+  //
+  // SYNC REQUIREMENT:
+  // When Payment.status changes, Appointment.paymentStatus must update too!
+  // This is handled in the payment service:
+  //
+  // await prisma.$transaction([
+  //   prisma.payment.update({
+  //     where: { id: paymentId },
+  //     data: { status: 'PAID' }
+  //   }),
+  //   prisma.appointment.update({
+  //     where: { id: appointmentId },
+  //     data: { paymentStatus: 'PAID' }  // Keep in sync!
+  //   })
+  // ]);
+  //
+  paymentStatus PaymentStatus @default(UNPAID)
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // NOTES: Additional information
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // @db.Text → Unlimited length
+  //
+  // Use cases:
+  // - Patient's description of symptoms
+  // - Special requests ("Please call before appointment")
+  // - Doctor's internal notes
+  //
+  notes String? @db.Text
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // CANCELLATION TRACKING
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // cancelledAt: When cancellation occurred
+  // cancelReason: Why it was cancelled
+  //
+  // IMPORTANT FOR:
+  // - Refund processing (calculate based on cancellation timing)
+  // - Analytics (why are appointments being cancelled?)
+  // - Policy enforcement (cancellation deadline)
+  //
+  // CANCELLATION POLICY EXAMPLE:
+  // const hoursBefore = differenceInHours(appointment.schedule.startDate, cancelledAt);
+  // if (hoursBefore < 24) {
+  //   // Late cancellation - partial refund or no refund
+  // } else {
+  //   // Full refund
+  // }
+  //
+  cancelledAt  DateTime?
+  cancelReason String?   @db.Text
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // AUDIT FIELDS
+  // ─────────────────────────────────────────────────────────────────────────────
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  isDeleted Boolean   @default(false)
+  deletedAt DateTime?
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // FOREIGN KEYS
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // patientId: The patient who booked
+  // doctorId: The doctor being seen
+  // scheduleId: The time slot (@unique - one appointment per slot)
+  //
+  // WHY scheduleId IS UNIQUE:
+  // Prevents double-booking! One schedule slot = one appointment max.
+  //
+  patientId  String
+  doctorId   String
+  scheduleId String @unique // ← CRITICAL: Prevents double booking
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // RELATIONS WITH REFERENTIAL ACTIONS
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // onDelete: Cascade
+  // - If patient/doctor/schedule deleted → Delete appointment
+  //
+  // onUpdate: Cascade
+  // - If ID changes → Update foreign key here
+  //
+  // WHY CASCADE FOR ALL?
+  // Healthcare context: If a doctor leaves, their appointments should be
+  // handled (cancelled/reassigned) in application logic BEFORE deletion.
+  // Cascade is a safety net to prevent orphan records.
+  //
+  patient  Patient  @relation(fields: [patientId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  doctor   Doctor   @relation(fields: [doctorId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  schedule Schedule @relation(fields: [scheduleId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // ONE-TO-ONE RELATIONS (Optional)
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // These are created AFTER the appointment is initially booked.
+  //
+  // payment: Created immediately after booking
+  // prescription: Created by doctor after appointment completion
+  // review: Created by patient after appointment completion
+  //
+  payment      Payment?
+  prescription Prescription?
+  review       Review?
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // INDEXES FOR COMMON QUERIES
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // appointment_patient_status_idx:
+  // - Query: "Patient's appointments by status"
+  // - Example: Show John's completed appointments
+  //
+  // appointment_doctor_status_idx:
+  // - Query: "Doctor's appointments by status"
+  // - Example: Dr. Smith's scheduled appointments today
+  //
+  // appointment_status_date_idx:
+  // - Composite: status + createdAt (descending)
+  // - Query: "Recent appointments by status"
+  // - Example: All cancelled appointments this month
+  //
+  // appointment_payment_status_idx:
+  // - Query: "Appointments by payment status"
+  // - Example: Find all unpaid appointments (send reminders)
+  //
+  @@index([patientId, status], map: "appointment_patient_status_idx")
+  @@index([doctorId, status], map: "appointment_doctor_status_idx")
+  @@index([status, createdAt(sort: Desc)], map: "appointment_status_date_idx")
+  @@index([paymentStatus], map: "appointment_payment_status_idx")
+  @@index([isDeleted], map: "appointment_deleted_idx")
+  @@index([scheduleId], map: "appointment_schedule_idx")
+  // Table mapping
+  @@map("appointments")
+}
+
+// ┌──────────────────────────────────────────────────────────────────────────────┐
+// │                            PAYMENT MODEL                                     │
+// │              Financial transaction for appointments                          │
+// └──────────────────────────────────────────────────────────────────────────────┘
+//
+// PURPOSE:
+// Tracks payment for each appointment.
+// One-to-one relationship with Appointment.
+//
+// PAYMENT FLOW:
+//
+//     Patient                    Backend                       Stripe
+//        │                          │                             │
+//        │ 1. Book appointment      │                             │
+//        │ ─────────────────────────>                             │
+//        │                          │ 2. Create PaymentIntent     │
+//        │                          │ ────────────────────────────>
+//        │                          │                             │
+//        │                          │ 3. Return client_secret     │
+//        │                          │ <────────────────────────────
+//        │ 4. Complete payment      │                             │
+//        │ ────────────────────────────────────────────────────────>
+//        │                          │                             │
+//        │                          │ 5. Webhook: payment_succeeded
+//        │                          │ <────────────────────────────
+//        │                          │                             │
+//        │ 6. Confirmation          │                             │
+//        │ <─────────────────────────                             │
+//
+// STRIPE INTEGRATION:
+// - stripePaymentIntentId: Links to Stripe PaymentIntent
+// - stripeEventId: Deduplication key for webhooks
+// - paymentGatewayData: Raw response from Stripe
+//
+/// Payment - Financial transaction for an appointment
+/// One-to-one relationship with Appointment
+model Payment {
+  // ─────────────────────────────────────────────────────────────────────────────
+  // PRIMARY KEY
+  // ─────────────────────────────────────────────────────────────────────────────
+  id String @id @default(uuid(7))
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // AMOUNT: Payment amount in smallest currency unit
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // CRITICAL: Stored in CENTS/PAISA, not dollars!
+  //
+  // WHY SMALLEST UNIT?
+  // Floating-point math is dangerous for money:
+  // 0.1 + 0.2 = 0.30000000000000004 (JavaScript)
+  //
+  // Using integers avoids this:
+  // 10 + 20 = 30 (cents) → $0.30
+  //
+  // CONVERSION:
+  // Display to user: (amount / 100).toFixed(2) → "$50.00"
+  // Store in DB: Math.round(dollars * 100) → 5000
+  //
+  // EXAMPLES:
+  // $50.00 → 5000
+  // $99.99 → 9999
+  // ₹500.00 → 50000 (paisa)
+  //
+  amount Int
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // TRANSACTION ID: Internal unique identifier
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // @unique → Each transaction has unique ID
+  //
+  // FORMAT RECOMMENDATION:
+  // TXN_<timestamp>_<random>
+  // Example: "TXN_20260115_abc123xyz"
+  //
+  // DIFFERENT FROM stripePaymentIntentId:
+  // - transactionId: Our internal reference
+  // - stripePaymentIntentId: Stripe's reference
+  //
+  transactionId String @unique @db.VarChar(100)
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // STATUS: Payment lifecycle state
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // See enums.prisma for PaymentStatus definition.
+  //
+  // STATE MACHINE:
+  // ┌────────┐    stripe confirms    ┌──────┐    cancel/dispute    ┌──────────┐
+  // │ UNPAID │ ───────────────────> │ PAID │ ──────────────────> │ REFUNDED │
+  // └────────┘                       └──────┘                      └──────────┘
+  //
+  status PaymentStatus @default(UNPAID)
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // STRIPE INTEGRATION FIELDS
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // stripePaymentIntentId:
+  // - Stripe's unique ID for this payment attempt
+  // - Format: "pi_1234567890..."
+  // - Used to retrieve payment status from Stripe
+  // - @unique prevents duplicate payments
+  //
+  // stripeEventId:
+  // - Webhook event ID from Stripe
+  // - Format: "evt_1234567890..."
+  // - Used for IDEMPOTENCY (prevent double-processing)
+  // - @unique ensures each webhook processed only once
+  //
+  // WEBHOOK IDEMPOTENCY:
+  // app.post('/webhook', async (req, res) => {
+  //   const eventId = req.body.id;
+  //
+  //   // Check if already processed
+  //   const existing = await prisma.payment.findFirst({
+  //     where: { stripeEventId: eventId }
+  //   });
+  //   if (existing) {
+  //     return res.status(200).send('Already processed');
+  //   }
+  //
+  //   // Process and store eventId
+  //   await prisma.payment.update({
+  //     where: { stripePaymentIntentId: req.body.data.object.id },
+  //     data: { stripeEventId: eventId, status: 'PAID' }
+  //   });
+  // });
+  //
+  stripePaymentIntentId String? @unique @db.VarChar(100)
+  stripeEventId         String? @unique @db.VarChar(100)
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // PAYMENT GATEWAY DATA: Raw response storage
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // @db.Json → PostgreSQL JSONB type (binary JSON, efficient queries)
+  //
+  // WHAT TO STORE:
+  // - Card last 4 digits (for display)
+  // - Card brand (Visa, Mastercard)
+  // - Payment method type
+  // - Raw Stripe response (for debugging)
+  //
+  // EXAMPLE:
+  // {
+  //   "card_last4": "4242",
+  //   "card_brand": "visa",
+  //   "payment_method_type": "card",
+  //   "stripe_response": { ... full response ... }
+  // }
+  //
+  // WHY STORE RAW RESPONSE?
+  // - Debugging payment issues
+  // - Audit trail
+  // - Dispute resolution
+  //
+  paymentGatewayData Json?
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // REFUND TRACKING
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // refundAmount: How much was refunded (in smallest unit)
+  // - Can be partial: refundAmount < amount
+  // - Full refund: refundAmount = amount
+  //
+  // refundReason: Why refund was issued
+  // - "Patient cancelled before 24 hours"
+  // - "Doctor unavailable"
+  // - "Service not provided"
+  //
+  // refundedAt: When refund was processed
+  //
+  refundAmount Int?
+  refundReason String?   @db.VarChar(500)
+  refundedAt   DateTime?
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // TIMESTAMPS
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // paidAt: When payment was confirmed (null until paid)
+  // Different from createdAt (when payment record was created)
+  //
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  paidAt    DateTime?
+  isDeleted Boolean   @default(false)
+  deletedAt DateTime?
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // FOREIGN KEY: One-to-one with Appointment
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // @unique → Enforces ONE payment per appointment
+  //
+  appointmentId String      @unique
+  appointment   Appointment @relation(fields: [appointmentId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // INDEXES
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // NOTE: @unique fields (transactionId, stripePaymentIntentId, etc.)
+  // automatically get indexes, so we don't need to declare them.
+  //
+  // payment_status_idx:
+  // - Query: "Find all paid/unpaid/refunded payments"
+  //
+  // payment_created_idx (Desc):
+  // - Query: "Recent payments" (for admin dashboard)
+  //
+  // payment_paid_at_idx (Desc):
+  // - Query: "Recently paid" (for reports)
+  //
+  @@index([status], map: "payment_status_idx")
+  @@index([createdAt(sort: Desc)], map: "payment_created_idx")
+  @@index([paidAt(sort: Desc)], map: "payment_paid_at_idx")
+  @@index([isDeleted], map: "payment_deleted_idx")
+  // Table mapping
+  @@map("payments")
+}
+
+// ┌──────────────────────────────────────────────────────────────────────────────┐
+// │                          PRESCRIPTION MODEL                                  │
+// │              Medical instructions from doctor to patient                     │
+// └──────────────────────────────────────────────────────────────────────────────┘
+//
+// PURPOSE:
+// Doctor writes prescription after appointment completion.
+// Contains medications, instructions, and follow-up date.
+//
+// WHEN CREATED:
+// After appointment status changes to COMPLETED.
+// Can only be created by the doctor of that appointment.
+//
+// LEGAL NOTE:
+// Prescriptions are legal medical documents.
+// Must be stored securely and retained per regulations (often 7+ years).
+//
+/// Prescription - Medical instructions from doctor to patient
+/// Created after appointment completion
+model Prescription {
+  // ─────────────────────────────────────────────────────────────────────────────
+  // PRIMARY KEY
+  // ─────────────────────────────────────────────────────────────────────────────
+  id String @id @default(uuid(7))
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // INSTRUCTIONS: The actual prescription content
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // @db.Text → Unlimited length for detailed instructions
+  //
+  // TYPICAL CONTENT:
+  // - Medications with dosage
+  // - Frequency (twice daily, as needed)
+  // - Duration (for 7 days, until symptoms resolve)
+  // - Special instructions (take with food, avoid driving)
+  // - Dietary recommendations
+  // - Exercise/lifestyle advice
+  //
+  // EXAMPLE:
+  // "1. Amoxicillin 500mg - Take 1 capsule 3 times daily for 7 days
+  //  2. Ibuprofen 400mg - Take as needed for pain (max 3 per day)
+  //  3. Rest for 48 hours, drink plenty of fluids
+  //  4. Return if fever persists beyond 3 days"
+  //
+  instructions String @db.Text
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // FOLLOW-UP DATE: When patient should return
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // @db.Date → Date only (no time component)
+  // Optional because not all prescriptions need follow-up
+  //
+  // USE CASES:
+  // - Chronic condition monitoring: "Return in 1 month"
+  // - Post-treatment check: "Return in 2 weeks"
+  // - null: No follow-up needed
+  //
+  followUpDate DateTime? @db.Date
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // AUDIT FIELDS
+  // ─────────────────────────────────────────────────────────────────────────────
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  isDeleted Boolean   @default(false)
+  deletedAt DateTime?
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // FOREIGN KEYS
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // appointmentId: @unique enforces one prescription per appointment
+  // patientId: Denormalized for quick queries (avoid JOIN through appointment)
+  // doctorId: Denormalized for quick queries
+  //
+  // WHY DENORMALIZE patientId/doctorId?
+  // Common queries:
+  // - "All prescriptions for patient X"
+  // - "All prescriptions by doctor Y"
+  // Without denormalization: JOIN through appointments table
+  // With denormalization: Direct query
+  //
+  appointmentId String @unique
+  patientId     String // Denormalized
+  doctorId      String // Denormalized
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // RELATIONS
+  // ─────────────────────────────────────────────────────────────────────────────
+  appointment Appointment @relation(fields: [appointmentId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  patient     Patient     @relation(fields: [patientId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  doctor      Doctor      @relation(fields: [doctorId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // INDEXES
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // prescription_patient_idx:
+  // - Composite: patientId + createdAt (desc)
+  // - Query: "Patient's prescription history, most recent first"
+  //
+  // prescription_doctor_idx:
+  // - Composite: doctorId + createdAt (desc)
+  // - Query: "Prescriptions written by doctor, most recent first"
+  //
+  @@index([patientId, createdAt(sort: Desc)], map: "prescription_patient_idx")
+  @@index([doctorId, createdAt(sort: Desc)], map: "prescription_doctor_idx")
+  @@index([isDeleted], map: "prescription_deleted_idx")
+  // Table mapping
+  @@map("prescriptions")
+}
+
+// ┌──────────────────────────────────────────────────────────────────────────────┐
+// │                             REVIEW MODEL                                     │
+// │              Patient feedback for completed appointments                     │
+// └──────────────────────────────────────────────────────────────────────────────┘
+//
+// PURPOSE:
+// Patients rate and review doctors after appointments.
+// Reviews affect doctor's averageRating (denormalized on Doctor model).
+//
+// WHEN CREATED:
+// After appointment is COMPLETED.
+// Patient can only review appointments they attended.
+//
+// BUSINESS RULES:
+// - Rating: 1-5 stars (validated in application)
+// - One review per appointment
+// - Optional comment
+// - Affects doctor's average rating
+//
+/// Review - Patient feedback for completed appointments
+/// Affects doctor's averageRating (denormalized on Doctor model)
+model Review {
+  // ─────────────────────────────────────────────────────────────────────────────
+  // PRIMARY KEY
+  // ─────────────────────────────────────────────────────────────────────────────
+  id String @id @default(uuid(7))
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // RATING: 1-5 star rating
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // @db.SmallInt → PostgreSQL SMALLINT (-32,768 to 32,767)
+  // - Saves space vs INT for small numbers
+  // - Only stores 2 bytes vs 4 bytes
+  //
+  // VALIDATION (in application code):
+  // if (rating < 1 || rating > 5) {
+  //   throw new Error('Rating must be between 1 and 5');
+  // }
+  //
+  // DISPLAY:
+  // ⭐ = 1 star (Poor)
+  // ⭐⭐ = 2 stars (Below Average)
+  // ⭐⭐⭐ = 3 stars (Average)
+  // ⭐⭐⭐⭐ = 4 stars (Good)
+  // ⭐⭐⭐⭐⭐ = 5 stars (Excellent)
+  //
+  rating Int @db.SmallInt
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // COMMENT: Optional detailed feedback
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // @db.Text → Unlimited length
+  // Optional because some patients just leave stars
+  //
+  // EXAMPLE:
+  // "Dr. Smith was very thorough and explained everything clearly.
+  //  Wait time was a bit long but the consultation was worth it."
+  //
+  comment String? @db.Text
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // AUDIT FIELDS
+  // ─────────────────────────────────────────────────────────────────────────────
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  isDeleted Boolean   @default(false)
+  deletedAt DateTime?
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // FOREIGN KEYS
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // appointmentId: @unique enforces one review per appointment
+  // patientId: Who wrote the review (denormalized)
+  // doctorId: Who is being reviewed (denormalized)
+  //
+  appointmentId String @unique
+  patientId     String // Denormalized
+  doctorId      String // Denormalized - IMPORTANT for average calculation!
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // RELATIONS
+  // ─────────────────────────────────────────────────────────────────────────────
+  appointment Appointment @relation(fields: [appointmentId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  patient     Patient     @relation(fields: [patientId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  doctor      Doctor      @relation(fields: [doctorId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // INDEXES
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // review_doctor_rating_idx:
+  // - Composite: doctorId + rating
+  // - Query: "Doctor's reviews by rating" (show 5-star first)
+  //
+  // review_patient_idx:
+  // - Query: "Reviews written by patient"
+  //
+  // review_created_idx (Desc):
+  // - Query: "Most recent reviews"
+  //
+  @@index([doctorId, rating], map: "review_doctor_rating_idx")
+  @@index([patientId], map: "review_patient_idx")
+  @@index([createdAt(sort: Desc)], map: "review_created_idx")
+  @@index([isDeleted], map: "review_deleted_idx")
+  // Table mapping
+  @@map("reviews")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// QUICK REFERENCE: APPOINTMENT LIFECYCLE OPERATIONS
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// 1. CREATE APPOINTMENT WITH PAYMENT:
+// const result = await prisma.$transaction(async (tx) => {
+//   // Create appointment
+//   const appointment = await tx.appointment.create({
+//     data: {
+//       patientId,
+//       doctorId,
+//       scheduleId,
+//       status: 'SCHEDULED',
+//       paymentStatus: 'UNPAID'
+//     }
+//   });
+//
+//   // Create payment record
+//   const payment = await tx.payment.create({
+//     data: {
+//       appointmentId: appointment.id,
+//       amount: doctorFee,  // In cents!
+//       transactionId: `TXN_${Date.now()}_${randomId()}`,
+//       status: 'UNPAID'
+//     }
+//   });
+//
+//   // Mark doctor's schedule as booked
+//   await tx.doctorSchedule.update({
+//     where: { doctorId_scheduleId: { doctorId, scheduleId } },
+//     data: { isBooked: true }
+//   });
+//
+//   return { appointment, payment };
+// });
+//
+// 2. PROCESS PAYMENT (webhook handler):
+// await prisma.$transaction([
+//   prisma.payment.update({
+//     where: { stripePaymentIntentId },
+//     data: {
+//       status: 'PAID',
+//       paidAt: new Date(),
+//       stripeEventId: eventId
+//     }
+//   }),
+//   prisma.appointment.update({
+//     where: { id: appointmentId },
+//     data: { paymentStatus: 'PAID' }
+//   })
+// ]);
+//
+// 3. COMPLETE APPOINTMENT:
+// await prisma.appointment.update({
+//   where: { id: appointmentId },
+//   data: { status: 'COMPLETED' }
+// });
+//
+// 4. CREATE PRESCRIPTION:
+// await prisma.prescription.create({
+//   data: {
+//     appointmentId,
+//     patientId,
+//     doctorId,
+//     instructions: '1. Medicine A...',
+//     followUpDate: new Date('2026-02-15')
+//   }
+// });
+//
+// 5. SUBMIT REVIEW (and update doctor rating):
+// await prisma.$transaction(async (tx) => {
+//   // Create review
+//   await tx.review.create({
+//     data: { appointmentId, patientId, doctorId, rating: 5, comment: '...' }
+//   });
+//
+//   // Update doctor's average rating
+//   const doctor = await tx.doctor.findUnique({ where: { id: doctorId } });
+//   const newAvg = ((doctor.averageRating * doctor.totalReviews) + 5)
+//                  / (doctor.totalReviews + 1);
+//   await tx.doctor.update({
+//     where: { id: doctorId },
+//     data: {
+//       averageRating: newAvg,
+//       totalReviews: { increment: 1 }
+//     }
+//   });
+// });
+// ═══════════════════════════════════════════════════════════════════════════════

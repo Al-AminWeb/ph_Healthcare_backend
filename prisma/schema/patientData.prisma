@@ -1,0 +1,677 @@
+// ╔══════════════════════════════════════════════════════════════════════════════╗
+// ║           PATIENTDATA.PRISMA - PATIENT HEALTH INFORMATION SYSTEM             ║
+// ║                    Complete Beginner's Guide                                 ║
+// ╚══════════════════════════════════════════════════════════════════════════════╝
+//
+// 📚 WHAT IS THIS FILE?
+// ─────────────────────
+// This file defines the PATIENT HEALTH DOMAIN - sensitive medical data:
+// - PatientHealthData → Comprehensive health profile (1:1 with Patient)
+// - MedicalReport     → Uploaded medical documents (1:M with Patient)
+//
+// ⚠️ PRIVACY & COMPLIANCE WARNING
+// ─────────────────────────────────
+// This file contains models for PROTECTED HEALTH INFORMATION (PHI).
+// These models require special handling:
+//
+//     ┌─────────────────────────────────────────────────────────────────────┐
+//     │                    COMPLIANCE REQUIREMENTS                          │
+//     ├────────────────────┬────────────────────────────────────────────────┤
+//     │   HIPAA (USA)      │ Health Insurance Portability and              │
+//     │                    │ Accountability Act                             │
+//     ├────────────────────┼────────────────────────────────────────────────┤
+//     │   GDPR (EU)        │ General Data Protection Regulation             │
+//     ├────────────────────┼────────────────────────────────────────────────┤
+//     │   Data at Rest     │ Encrypt database and file storage              │
+//     ├────────────────────┼────────────────────────────────────────────────┤
+//     │   Data in Transit  │ Use HTTPS/TLS for all communications           │
+//     ├────────────────────┼────────────────────────────────────────────────┤
+//     │   Access Logging   │ Log all access to PHI                          │
+//     ├────────────────────┼────────────────────────────────────────────────┤
+//     │   Retention        │ Retain records per legal requirements          │
+//     │                    │ (often 7+ years)                               │
+//     ├────────────────────┼────────────────────────────────────────────────┤
+//     │   Access Control   │ Only authorized personnel can access           │
+//     └────────────────────┴────────────────────────────────────────────────┘
+//
+// 🎯 BUSINESS CONTEXT
+// ───────────────────
+// Patient health data helps doctors:
+// - Understand patient's medical history
+// - Check for allergies before prescribing
+// - Know emergency contacts
+// - Track ongoing conditions
+//
+// PATIENT JOURNEY:
+// 1. Patient registers → Patient profile created (basic info)
+// 2. Patient updates health info → PatientHealthData created
+// 3. Patient uploads documents → MedicalReport records created
+// 4. Doctor reviews during appointment
+//
+// 📐 DESIGN PATTERN: OPTIONAL ONE-TO-ONE
+// ──────────────────────────────────────
+// PatientHealthData is OPTIONAL for Patient.
+//
+// WHY?
+// - New patients don't have health data yet
+// - Privacy: Some patients prefer not to share
+// - Progressive disclosure: Add data over time
+//
+// RELATIONSHIP:
+//     Patient                    PatientHealthData
+//     ┌────────────────┐        ┌────────────────────┐
+//     │ id             │───────?│ patientId (FK)     │
+//     │ name           │        │ dateOfBirth        │
+//     │ email          │        │ bloodGroup         │
+//     │ ...            │        │ heightCm, weightKg │
+//     └────────────────┘        │ allergies          │
+//                               │ ...                │
+//                               └────────────────────┘
+//
+//     The "?" means optional (0 or 1)
+//
+// 📐 DESIGN PATTERN: EXPLICIT UNIT NAMING
+// ───────────────────────────────────────
+// Notice field names include units: heightCm, weightKg, bmi
+//
+// WHY EXPLICIT UNITS?
+// ─────────────────
+// Medical data MUST be unambiguous about units.
+// A height of "175" could mean:
+// - 175 cm (correct)
+// - 175 inches (wrong - would be 14.5 feet!)
+// - 175 mm (wrong - would be 17.5 cm)
+//
+// BAD PRACTICE:
+// height Float   // What unit? cm? inches? feet?
+//
+// GOOD PRACTICE:
+// heightCm Float  // Clearly centimeters
+// weightKg Float  // Clearly kilograms
+//
+// INDUSTRY STANDARD:
+// - HL7 FHIR (healthcare data standard) uses explicit units
+// - All medical systems should be unambiguous
+//
+// UNIT CONVERSIONS (for US users):
+// heightCm × 0.393701 = inches
+// weightKg × 2.20462 = pounds
+//
+// 📖 DOCUMENTATION:
+// - One-to-One Relations: https://www.prisma.io/docs/orm/prisma-schema/data-model/relations/one-to-one-relations
+// - HIPAA Compliance: https://www.hhs.gov/hipaa/index.html
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ┌──────────────────────────────────────────────────────────────────────────────┐
+// │                       PATIENTHEALTHDATA MODEL                                │
+// │              Comprehensive health profile for patients                       │
+// └──────────────────────────────────────────────────────────────────────────────┘
+//
+// PURPOSE:
+// Stores detailed health information beyond basic profile.
+// Created when patient first updates their health info.
+//
+// WHAT IT TRACKS:
+// - Demographics: DOB, gender, marital status
+// - Physical: Height, weight, BMI
+// - Medical: Blood group, allergies, conditions, medications
+// - Family history: Hereditary conditions
+// - Emergency: Contact information
+// - Lifestyle: Smoking, alcohol, diet
+//
+/// PatientHealthData - Comprehensive health profile for a patient
+/// Optional 1:1 relationship - created when patient first updates health info
+///
+/// @note This model contains Protected Health Information (PHI).
+///       Ensure HIPAA compliance: encryption at rest, audit logging, access control.
+///
+/// @example Creating patient health data:
+///   {
+///     dateOfBirth: new Date('1990-05-15'),
+///     gender: 'MALE',
+///     bloodGroup: 'O_POSITIVE',
+///     heightCm: 175.5,      // 175.5 centimeters
+///     weightKg: 70.2,       // 70.2 kilograms
+///     bmi: 22.8             // Auto-calculated: weightKg / (heightCm/100)²
+///   }
+model PatientHealthData {
+  // ─────────────────────────────────────────────────────────────────────────────
+  // PRIMARY KEY: UUID v7 (time-ordered)
+  // ─────────────────────────────────────────────────────────────────────────────
+  id String @id @default(uuid(7))
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // DEMOGRAPHIC INFORMATION
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // dateOfBirth:
+  // @db.Date → PostgreSQL DATE (YYYY-MM-DD only)
+  // Required for age calculations and pediatric/geriatric considerations
+  //
+  // CALCULATING AGE:
+  // const age = differenceInYears(new Date(), patient.dateOfBirth);
+  //
+  // gender:
+  // From Gender enum (MALE, FEMALE, OTHER)
+  // Important for medical contexts (dosage, conditions)
+  //
+  // bloodGroup:
+  // From BloodGroup enum (A_POSITIVE, O_NEGATIVE, etc.)
+  // Optional - some patients don't know their blood type
+  // CRITICAL for emergencies and transfusions
+  //
+  // maritalStatus:
+  // From MaritalStatus enum
+  // Optional - useful for medical history (pregnancy, etc.)
+  //
+  dateOfBirth   DateTime       @db.Date
+  gender        Gender
+  bloodGroup    BloodGroup?
+  maritalStatus MaritalStatus?
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PHYSICAL MEASUREMENTS (with explicit units in field names)
+  // ═══════════════════════════════════════════════════════════════════════════
+  //
+  // BEST PRACTICE: EXPLICIT UNIT NAMING
+  // ───────────────────────────────────
+  // Medical data REQUIRES unambiguous units.
+  // Field names include unit suffix: heightCm, weightKg
+  //
+  // WHY THIS MATTERS:
+  // NASA Mars Climate Orbiter crashed in 1999 because one team used
+  // metric units and another used imperial. Cost: $125 million.
+  // In healthcare, unit confusion can be life-threatening!
+  //
+  // INDUSTRY STANDARD:
+  // HL7 FHIR (healthcare data standard) uses explicit units.
+  // This pattern is common in all serious medical systems.
+  //
+  // @map("height_cm") → Column name in database is "height_cm" (snake_case)
+  // Field name in code is "heightCm" (camelCase)
+  //
+
+  /// Height in centimeters (cm). Example: 175.5 = 175.5 cm = 5'9"
+  /// @precision Stored as DOUBLE PRECISION in PostgreSQL (15-17 significant digits)
+  //
+  // CONVERSION EXAMPLES:
+  // 175 cm = 68.9 inches = 5'9"
+  // 160 cm = 63.0 inches = 5'3"
+  // 180 cm = 70.9 inches = 5'11"
+  //
+  // FORMULA: inches = cm × 0.393701
+  //
+  heightCm Float? @map("height_cm")
+
+  /// Weight in kilograms (kg). Example: 70.2 = 70.2 kg = 154.8 lbs
+  /// @precision Stored as DOUBLE PRECISION in PostgreSQL
+  //
+  // CONVERSION EXAMPLES:
+  // 70 kg = 154.3 lbs
+  // 60 kg = 132.3 lbs
+  // 80 kg = 176.4 lbs
+  //
+  // FORMULA: lbs = kg × 2.20462
+  //
+  weightKg Float? @map("weight_kg")
+
+  /// Body Mass Index - calculated field: weightKg / (heightCm/100)²
+  /// @note Should be recalculated on every height/weight update
+  /// @range Healthy BMI: 18.5-24.9, Overweight: 25-29.9, Obese: 30+
+  //
+  // BMI FORMULA:
+  // bmi = weightKg / (heightCm / 100)²
+  //
+  // EXAMPLE:
+  // Weight: 70 kg, Height: 175 cm
+  // bmi = 70 / (1.75)² = 70 / 3.0625 = 22.86
+  //
+  // BMI CATEGORIES:
+  // ┌──────────────────┬─────────────┬─────────────────────────────┐
+  // │ Category         │ BMI Range   │ Health Implications         │
+  // ├──────────────────┼─────────────┼─────────────────────────────┤
+  // │ Underweight      │ < 18.5      │ May indicate malnutrition   │
+  // │ Normal           │ 18.5 - 24.9 │ Healthy weight range        │
+  // │ Overweight       │ 25.0 - 29.9 │ Increased health risks      │
+  // │ Obese Class I    │ 30.0 - 34.9 │ High health risks           │
+  // │ Obese Class II   │ 35.0 - 39.9 │ Very high health risks      │
+  // │ Obese Class III  │ ≥ 40.0      │ Extremely high health risks │
+  // └──────────────────┴─────────────┴─────────────────────────────┘
+  //
+  // APPLICATION CODE:
+  // function calculateBMI(weightKg: number, heightCm: number): number {
+  //   const heightM = heightCm / 100;
+  //   return Math.round((weightKg / (heightM * heightM)) * 100) / 100;
+  // }
+  //
+  bmi Float? @map("bmi")
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // MEDICAL HISTORY (stored as text for flexibility)
+  // ═══════════════════════════════════════════════════════════════════════════
+  //
+  // WHY TEXT INSTEAD OF JSON/STRUCTURED?
+  // - Simpler input for patients
+  // - Flexible format
+  // - Full-text search possible
+  //
+  // FUTURE IMPROVEMENT:
+  // Consider using JSON type for structured storage:
+  // allergies: [{ name: "Penicillin", severity: "severe" }]
+  //
+
+  /// Known allergies - medications, food, environmental
+  /// @example "Penicillin (severe), Peanuts (moderate), Latex (mild)"
+  //
+  // ALLERGY TYPES:
+  // - Drug allergies: Penicillin, Sulfa, Aspirin
+  // - Food allergies: Peanuts, Shellfish, Dairy
+  // - Environmental: Pollen, Dust, Pet dander
+  // - Contact: Latex, Nickel
+  //
+  // WHY THIS IS CRITICAL:
+  // Prescribing a medication to someone allergic can be fatal!
+  // Always check allergies before prescribing.
+  //
+  allergies String? @db.Text
+
+  /// Ongoing chronic conditions requiring regular management
+  /// @example "Type 2 Diabetes, Hypertension, Asthma"
+  //
+  // COMMON CHRONIC CONDITIONS:
+  // - Cardiovascular: Hypertension, Heart disease
+  // - Metabolic: Diabetes, Thyroid disorders
+  // - Respiratory: Asthma, COPD
+  // - Autoimmune: Rheumatoid arthritis, Lupus
+  // - Mental health: Depression, Anxiety
+  //
+  chronicConditions String? @db.Text
+
+  /// Current medications with dosage information
+  /// @example "Metformin 500mg twice daily, Lisinopril 10mg once daily"
+  //
+  // WHY TRACK MEDICATIONS:
+  // - Drug interactions (dangerous combinations)
+  // - Dosage adjustments
+  // - Avoid duplicate prescriptions
+  //
+  // RECOMMENDED FORMAT:
+  // "[Drug Name] [Dose] [Frequency]"
+  // Example: "Metformin 500mg twice daily after meals"
+  //
+  currentMedications String? @db.Text
+
+  /// Family history of medical conditions (hereditary risk factors)
+  /// @example "Father: Heart disease, Mother: Type 2 Diabetes"
+  //
+  // WHY FAMILY HISTORY MATTERS:
+  // Many conditions have genetic components:
+  // - Heart disease
+  // - Diabetes
+  // - Cancer
+  // - Mental health conditions
+  //
+  // Helps doctors assess risk and recommend preventive care.
+  //
+  familyMedicalHistory String? @db.Text
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // EMERGENCY CONTACT INFORMATION
+  // ═══════════════════════════════════════════════════════════════════════════
+  //
+  // CRITICAL FOR EMERGENCIES:
+  // If patient is unconscious or incapacitated, who do we call?
+  //
+
+  /// Emergency contact full name
+  emergencyContactName String? @db.VarChar(100)
+
+  /// Emergency contact phone with country code
+  /// @example "+1-555-123-4567" or "+880-1712-345678"
+  //
+  // PHONE FORMAT:
+  // International format recommended: +[country code]-[number]
+  // Examples:
+  // - USA: +1-555-123-4567
+  // - UK: +44-20-7946-0958
+  // - Bangladesh: +880-1712-345678
+  //
+  emergencyContactPhone String? @db.VarChar(20)
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // LIFESTYLE INFORMATION (affects treatment decisions)
+  // ═══════════════════════════════════════════════════════════════════════════
+  //
+  // WHY LIFESTYLE DATA MATTERS:
+  // - Smoking affects lung health, surgery risk, medication metabolism
+  // - Alcohol interacts with many medications
+  // - Diet affects chronic conditions (diabetes, heart disease)
+  //
+
+  /// Smoking status: true = smoker, false = non-smoker, null = not disclosed
+  //
+  // MEDICAL RELEVANCE:
+  // - Increased risk: Lung cancer, heart disease, stroke
+  // - Surgery: Higher complication risk
+  // - Medications: Some drugs metabolized differently
+  //
+  smokingStatus Boolean?
+
+  /// Alcohol consumption: true = consumes, false = abstains, null = not disclosed
+  //
+  // MEDICAL RELEVANCE:
+  // - Drug interactions (especially sedatives, pain meds)
+  // - Liver function considerations
+  // - Surgery: Withdrawal risk in heavy drinkers
+  //
+  alcoholConsumption Boolean?
+
+  /// Dietary restrictions or preferences
+  /// @example "Vegetarian, Lactose intolerant, Low sodium diet"
+  //
+  // EXAMPLES:
+  // - Religious: Halal, Kosher, Vegetarian (Hindu)
+  // - Medical: Low sodium (hypertension), Gluten-free (celiac)
+  // - Preference: Vegan, Pescatarian
+  //
+  // WHY IT MATTERS:
+  // - Some medications contain animal products
+  // - Diet affects chronic conditions
+  // - Hospital meal planning
+  //
+  dietaryPreferences String? @db.Text
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // AUDIT FIELDS (standard across all models)
+  // ═══════════════════════════════════════════════════════════════════════════
+  //
+  // SPECIAL NOTE FOR PHI:
+  // In addition to standard audit fields, you should implement:
+  // - Access logging (who viewed this data, when)
+  // - Change logging (what was changed, by whom)
+  // This is required for HIPAA compliance.
+  //
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  isDeleted Boolean   @default(false)
+  deletedAt DateTime?
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // FOREIGN KEY: One-to-one with Patient
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // @unique → Enforces ONE health record per patient
+  //
+  // WHY ONE-TO-ONE (not one-to-many)?
+  // - Each patient has one current health profile
+  // - Historical data can be tracked via updatedAt or separate audit table
+  // - Simpler queries
+  //
+  patientId String  @unique
+  patient   Patient @relation(fields: [patientId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // INDEXES
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // patient_health_data_blood_group_idx:
+  // - Query: "Find patients with O_NEGATIVE blood" (for blood donor matching)
+  // - Emergency: "Who can donate to this patient?"
+  //
+  // patient_health_data_dob_idx:
+  // - Query: Age-based queries
+  // - Example: "Patients over 65" (geriatric care)
+  // - Example: "Patients under 18" (pediatric care)
+  //
+  @@index([isDeleted], map: "patient_health_data_deleted_idx")
+  @@index([bloodGroup], map: "patient_health_data_blood_group_idx")
+  @@index([dateOfBirth], map: "patient_health_data_dob_idx")
+  // Table mapping: snake_case table name
+  @@map("patient_health_data")
+}
+
+// ┌──────────────────────────────────────────────────────────────────────────────┐
+// │                         MEDICALREPORT MODEL                                  │
+// │              Uploaded medical documents for patients                         │
+// └──────────────────────────────────────────────────────────────────────────────┘
+//
+// PURPOSE:
+// Stores references to uploaded medical documents.
+// The actual files are stored in cloud storage (S3, GCS, etc.)
+// This table stores metadata and file URLs.
+//
+// DOCUMENT TYPES:
+// - Lab reports (blood tests, urine tests)
+// - Imaging (X-rays, MRI, CT scans)
+// - Previous prescriptions
+// - Surgical reports
+// - Discharge summaries
+//
+// FILE STORAGE PATTERN:
+//
+//     Patient                  MedicalReport                 Cloud Storage
+//     ┌──────────┐            ┌──────────────┐              ┌───────────────┐
+//     │ id       │───────────<│ patientId    │              │ S3 / GCS      │
+//     │ name     │            │ reportType   │              │               │
+//     │ ...      │            │ fileUrl  ─────────────────>│ /reports/     │
+//     └──────────┘            │ reportName   │              │   blood_test.pdf
+//                             │ notes        │              │   xray_chest.jpg
+//                             └──────────────┘              └───────────────┘
+//
+// SECURITY CONSIDERATIONS:
+// - Use signed URLs for file access (temporary, expiring links)
+// - Don't store files in public S3 buckets
+// - Log all file access for HIPAA compliance
+//
+/// MedicalReport - Uploaded medical documents for a patient
+/// Stores file references and metadata for lab reports, scans, etc.
+model MedicalReport {
+  // ─────────────────────────────────────────────────────────────────────────────
+  // PRIMARY KEY
+  // ─────────────────────────────────────────────────────────────────────────────
+  id String @id @default(uuid(7))
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // REPORT NAME: Human-readable identifier
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // @db.VarChar(200) → Max 200 characters
+  //
+  // EXAMPLES:
+  // - "Blood Test Results - January 2026"
+  // - "Chest X-Ray - Pre-surgery"
+  // - "MRI Brain - Follow-up"
+  //
+  // NAMING BEST PRACTICE:
+  // "[Type] - [Date/Purpose]"
+  //
+  reportName String @db.VarChar(200)
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // REPORT TYPE: Categorization using enum
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // From ReportType enum (see enums.prisma):
+  // - LAB_REPORT: Blood tests, urine tests, biopsies
+  // - IMAGING: X-rays, MRI, CT scans, ultrasounds
+  // - PRESCRIPTION: Previous prescriptions from other doctors
+  // - DISCHARGE_SUMMARY: Hospital discharge documents
+  // - CONSULTATION_NOTES: Notes from specialist consultations
+  // - INSURANCE: Insurance documents, claims
+  // - OTHER: Anything that doesn't fit above
+  //
+  // WHY ENUM INSTEAD OF STRING?
+  // - Type safety
+  // - Easier filtering
+  // - Consistent categorization
+  //
+  reportType ReportType
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // FILE URL: Location of uploaded file
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // @db.VarChar(500) → URLs can be long (especially signed URLs)
+  //
+  // URL PATTERNS:
+  //
+  // S3 (AWS):
+  // https://bucket-name.s3.region.amazonaws.com/path/to/file.pdf
+  //
+  // S3 Signed URL (temporary):
+  // https://bucket.s3.amazonaws.com/file.pdf?X-Amz-Signature=...&X-Amz-Expires=3600
+  //
+  // GCS (Google Cloud):
+  // https://storage.googleapis.com/bucket-name/path/to/file.pdf
+  //
+  // Cloudinary:
+  // https://res.cloudinary.com/cloud-name/image/upload/v123/file.pdf
+  //
+  // SECURITY:
+  // For PHI, use SIGNED URLs that:
+  // - Expire after short time (1 hour)
+  // - Can only be accessed by authorized users
+  // - Are logged for audit trail
+  //
+  fileUrl String @db.VarChar(500)
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // NOTES: Additional information about the report
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // @db.Text → Unlimited length
+  // Optional field for context
+  //
+  // EXAMPLES:
+  // - "Results show slightly elevated cholesterol, discussed with Dr. Smith"
+  // - "Follow-up required in 3 months"
+  // - "Previous doctor's prescription from before joining our system"
+  //
+  notes String? @db.Text
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // AUDIT FIELDS
+  // ─────────────────────────────────────────────────────────────────────────────
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  isDeleted Boolean   @default(false)
+  deletedAt DateTime?
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // FOREIGN KEY: One-to-many with Patient
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // NOT @unique → A patient can have MANY reports
+  //
+  // CASCADE:
+  // If patient deleted → All their reports deleted
+  //
+  patientId String
+  patient   Patient @relation(fields: [patientId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // INDEXES
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // medical_report_patient_idx:
+  // - Composite: patientId + createdAt (desc)
+  // - Query: "Patient's reports, most recent first"
+  // - Use case: Show patient's medical history
+  //
+  // medical_report_type_idx:
+  // - Query: "All lab reports" or "All imaging reports"
+  // - Use case: Filter by report type
+  //
+  @@index([patientId, createdAt(sort: Desc)], map: "medical_report_patient_idx")
+  @@index([reportType], map: "medical_report_type_idx")
+  @@index([isDeleted], map: "medical_report_deleted_idx")
+  // Table mapping
+  @@map("medical_reports")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// QUICK REFERENCE: WORKING WITH PATIENT HEALTH DATA
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// 1. CREATE PATIENT HEALTH DATA:
+// const healthData = await prisma.patientHealthData.create({
+//   data: {
+//     patientId: patient.id,
+//     dateOfBirth: new Date('1990-05-15'),
+//     gender: 'MALE',
+//     bloodGroup: 'O_POSITIVE',
+//     heightCm: 175.5,
+//     weightKg: 70.2,
+//     bmi: calculateBMI(70.2, 175.5),  // 22.8
+//     allergies: 'Penicillin (severe)',
+//     emergencyContactName: 'Jane Doe',
+//     emergencyContactPhone: '+1-555-123-4567'
+//   }
+// });
+//
+// 2. UPDATE WITH BMI CALCULATION:
+// function calculateBMI(weightKg: number, heightCm: number): number {
+//   const heightM = heightCm / 100;
+//   return Math.round((weightKg / (heightM * heightM)) * 100) / 100;
+// }
+//
+// await prisma.patientHealthData.update({
+//   where: { patientId: patient.id },
+//   data: {
+//     weightKg: 72.5,
+//     bmi: calculateBMI(72.5, healthData.heightCm)
+//   }
+// });
+//
+// 3. GET PATIENT WITH HEALTH DATA AND REPORTS:
+// const patientWithHealth = await prisma.patient.findUnique({
+//   where: { id: patientId },
+//   include: {
+//     patientHealthData: true,
+//     medicalReport: {
+//       where: { isDeleted: false },
+//       orderBy: { createdAt: 'desc' }
+//     }
+//   }
+// });
+//
+// 4. UPLOAD MEDICAL REPORT:
+// // First, upload file to S3/GCS and get URL
+// const fileUrl = await uploadToS3(file);
+//
+// // Then create database record
+// await prisma.medicalReport.create({
+//   data: {
+//     patientId: patient.id,
+//     reportName: 'Blood Test - January 2026',
+//     reportType: 'LAB_REPORT',
+//     fileUrl: fileUrl,
+//     notes: 'Annual checkup results'
+//   }
+// });
+//
+// 5. FIND PATIENTS WITH SPECIFIC BLOOD GROUP (for blood bank):
+// const oNegativePatients = await prisma.patientHealthData.findMany({
+//   where: {
+//     bloodGroup: 'O_NEGATIVE',
+//     isDeleted: false
+//   },
+//   include: {
+//     patient: {
+//       select: { name: true, contactNumber: true }
+//     }
+//   }
+// });
+//
+// 6. FIND PATIENTS BY AGE RANGE:
+// const today = new Date();
+// const sixtyFiveYearsAgo = subYears(today, 65);
+//
+// const elderlyPatients = await prisma.patientHealthData.findMany({
+//   where: {
+//     dateOfBirth: { lte: sixtyFiveYearsAgo },
+//     isDeleted: false
+//   },
+//   include: { patient: true }
+// });
+// ═══════════════════════════════════════════════════════════════════════════════

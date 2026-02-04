@@ -1,0 +1,10 @@
+.env
+node_modules
+!.env.example
+
+/generated/prisma
+src/generated/prisma
+
+.vercel
+render.yaml
+/src/generated/prisma

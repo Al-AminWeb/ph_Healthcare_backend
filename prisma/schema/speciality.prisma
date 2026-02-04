@@ -1,0 +1,407 @@
+// ╔══════════════════════════════════════════════════════════════════════════════╗
+// ║            SPECIALTY.PRISMA - MEDICAL SPECIALIZATION SYSTEM                  ║
+// ║                    Complete Beginner's Guide                                 ║
+// ╚══════════════════════════════════════════════════════════════════════════════╝
+//
+// 📚 WHAT IS THIS FILE?
+// ─────────────────────
+// This file defines the SPECIALTY DOMAIN - medical specializations:
+// - Specialty       → Medical specialty definitions (e.g., Cardiology, Neurology)
+// - DoctorSpecialty → Junction table for Doctor-Specialty many-to-many
+//
+// 🎯 BUSINESS CONTEXT
+// ───────────────────
+// Medical specialties help patients find the right doctor:
+//
+//     ┌─────────────────────────────────────────────────────────────┐
+//     │                    MEDICAL SPECIALTIES                      │
+//     ├──────────────────┬──────────────────┬──────────────────────┤
+//     │   Cardiology 💓  │   Neurology 🧠   │   Orthopedics 🦴    │
+//     │   Heart/Blood    │   Brain/Nerves   │   Bones/Joints       │
+//     ├──────────────────┼──────────────────┼──────────────────────┤
+//     │   Pediatrics 👶  │  Dermatology 🩺  │   Psychiatry 🧘     │
+//     │   Children       │   Skin           │   Mental Health      │
+//     └──────────────────┴──────────────────┴──────────────────────┘
+//
+// USER JOURNEY:
+// 1. Patient has heart problems → Searches "Cardiology"
+// 2. System shows all cardiologists
+// 3. Patient picks based on ratings, fees, availability
+//
+// 📐 DESIGN PATTERN: MANY-TO-MANY RELATIONSHIP
+// ─────────────────────────────────────────────
+// A doctor can have MULTIPLE specialties.
+// A specialty can belong to MULTIPLE doctors.
+//
+//     Dr. Smith         Specialties        Dr. Jones
+//     ┌─────────┐      ┌────────────┐      ┌─────────┐
+//     │ Doctor  │──────│ Cardiology │──────│ Doctor  │
+//     │  Smith  │      └────────────┘      │  Jones  │
+//     │         │      ┌────────────┐      │         │
+//     │         │──────│  Internal  │      │         │
+//     │         │      │  Medicine  │      │         │
+//     └─────────┘      └────────────┘      └─────────┘
+//
+// Dr. Smith: Cardiology + Internal Medicine
+// Dr. Jones: Cardiology only
+//
+// DATABASE TABLES:
+//
+// doctors              doctor_specialties       specialties
+// ┌────────────────┐   ┌────────────────────┐   ┌────────────────┐
+// │ id             │   │ doctorId (FK)  ────────│ id             │
+// │ name           │   │ specialtyId (FK) ──────│ title          │
+// │ ...            │   │ createdAt          │   │ icon           │
+// └────────────────┘   │ updatedAt          │   │ description    │
+//                      └────────────────────┘   └────────────────┘
+//
+// WHY NOT PUT specialtyId DIRECTLY ON DOCTOR?
+// ❌ Doctor can only have ONE specialty
+// ❌ Can't track when specialty was added
+// ❌ Harder to query "all cardiologists"
+//
+// WITH JUNCTION TABLE:
+// ✅ Doctor can have multiple specialties
+// ✅ Track when specialty was assigned (audit)
+// ✅ Easy queries in both directions
+//
+// 📐 IMPLICIT VS EXPLICIT MANY-TO-MANY
+// ────────────────────────────────────
+// Prisma supports IMPLICIT many-to-many (auto junction table).
+// We use EXPLICIT junction table because:
+//
+// IMPLICIT (Prisma manages junction):
+// model Doctor {
+//   specialties Specialty[]
+// }
+// model Specialty {
+//   doctors Doctor[]
+// }
+// Prisma creates _DoctorToSpecialty automatically.
+//
+// EXPLICIT (We define junction table):
+// model DoctorSpecialty {
+//   doctorId String
+//   specialtyId String
+//   createdAt DateTime  // ← Extra fields!
+//   updatedAt DateTime  // ← Extra fields!
+// }
+//
+// WHY EXPLICIT?
+// ✅ Audit fields (createdAt, updatedAt)
+// ✅ Potential future fields (isPrimary, certificationDate)
+// ✅ Full control over table/column names
+// ✅ Explicit referential actions
+//
+// 📖 DOCUMENTATION:
+// - Many-to-Many: https://www.prisma.io/docs/orm/prisma-schema/data-model/relations/many-to-many-relations
+// - Junction Tables: https://www.prisma.io/docs/orm/prisma-schema/data-model/relations/many-to-many-relations#explicit-many-to-many-relations
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ┌──────────────────────────────────────────────────────────────────────────────┐
+// │                           SPECIALTY MODEL                                    │
+// │              Medical specialty definitions                                   │
+// └──────────────────────────────────────────────────────────────────────────────┘
+//
+// PURPOSE:
+// Master list of medical specializations.
+// Used for categorizing and filtering doctors.
+//
+// COMMON SPECIALTIES:
+// - Cardiology: Heart and cardiovascular system
+// - Neurology: Brain and nervous system
+// - Orthopedics: Bones, joints, muscles
+// - Pediatrics: Children's health
+// - Dermatology: Skin conditions
+// - Psychiatry: Mental health
+// - Oncology: Cancer treatment
+// - Gynecology: Women's health
+// - Urology: Urinary tract and male reproductive
+// - Ophthalmology: Eye care
+//
+/// Specialty - Medical specialty definition
+/// Used for categorizing and filtering doctors
+model Specialty {
+  // ─────────────────────────────────────────────────────────────────────────────
+  // PRIMARY KEY: UUID v7 (time-ordered)
+  // ─────────────────────────────────────────────────────────────────────────────
+  id String @id @default(uuid(7))
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // TITLE: Specialty name (unique)
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // @unique → Only one specialty per title
+  // @db.VarChar(100) → Max 100 characters
+  //
+  // WHY UNIQUE?
+  // - Prevent duplicate specialties
+  // - Enable lookup by title: findUnique({ where: { title: 'Cardiology' } })
+  //
+  // EXAMPLES:
+  // - "Cardiology"
+  // - "Internal Medicine"
+  // - "Pediatric Cardiology" (subspecialty)
+  //
+  title String @unique @db.VarChar(100)
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // ICON: Visual representation (optional)
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // URL to specialty icon for UI display.
+  // Can be:
+  // - CDN URL: https://cdn.example.com/icons/cardiology.svg
+  // - Local path: /icons/cardiology.svg
+  // - Icon library name: "heart-pulse" (if using icon library)
+  //
+  icon String? @db.VarChar(255)
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // DESCRIPTION: Detailed explanation (optional)
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // @db.Text → Unlimited length
+  //
+  // PURPOSE:
+  // Help patients understand what this specialty treats.
+  //
+  // EXAMPLE for Cardiology:
+  // "Cardiology is a branch of medicine dealing with disorders of the
+  //  heart and cardiovascular system. Cardiologists diagnose and treat
+  //  conditions such as coronary artery disease, heart failure,
+  //  arrhythmias, and congenital heart defects."
+  //
+  description String? @db.Text
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // AUDIT FIELDS
+  // ─────────────────────────────────────────────────────────────────────────────
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  isDeleted Boolean   @default(false)
+  deletedAt DateTime?
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // RELATIONS
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // doctorSpecialties: All doctor-specialty links
+  // Through this, we can get all doctors with this specialty
+  //
+  // QUERY: Find all cardiologists
+  // const cardiologists = await prisma.specialty.findUnique({
+  //   where: { title: 'Cardiology' },
+  //   include: {
+  //     doctorSpecialties: {
+  //       include: { doctor: true }
+  //     }
+  //   }
+  // });
+  //
+  doctorSpecialties DoctorSpecialty[]
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // INDEXES
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // specialty_title_idx:
+  // - Speeds up title searches
+  // - Note: @unique already creates an index, this is explicit for clarity
+  //
+  // specialty_deleted_idx:
+  // - For soft delete filtering
+  //
+  @@index([title], map: "specialty_title_idx")
+  @@index([isDeleted], map: "specialty_deleted_idx")
+  // Table mapping: Prisma "Specialty" → PostgreSQL "specialties"
+  @@map("specialties")
+}
+
+// ┌──────────────────────────────────────────────────────────────────────────────┐
+// │                        DOCTORSPECIALTY MODEL                                 │
+// │              Junction table for Doctor-Specialty relationship                │
+// └──────────────────────────────────────────────────────────────────────────────┘
+//
+// PURPOSE:
+// Links doctors to their medical specializations.
+// Enables many-to-many relationship with audit trail.
+//
+// COMPOSITE PRIMARY KEY:
+// Primary key is (doctorId + specialtyId) together.
+// This automatically prevents duplicate assignments.
+//
+// USE CASES:
+// ─────────
+// 1. "Assign specialty to doctor"
+//    → Insert into DoctorSpecialty
+//
+// 2. "Remove specialty from doctor"
+//    → Delete from DoctorSpecialty
+//
+// 3. "Get all doctors with Cardiology specialty"
+//    → Query DoctorSpecialty WHERE specialtyId = <cardiology_id>
+//
+// 4. "Get all specialties for Dr. Smith"
+//    → Query DoctorSpecialty WHERE doctorId = <dr_smith_id>
+//
+/// DoctorSpecialty - Junction table for Doctor-Specialty relationship
+/// Links doctors to their medical specializations
+model DoctorSpecialty {
+  // ─────────────────────────────────────────────────────────────────────────────
+  // COMPOSITE PRIMARY KEY FIELDS
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // Together, these form the primary key: @@id([doctorId, specialtyId])
+  //
+  // WHAT THIS PREVENTS:
+  // - Same doctor having same specialty twice
+  // - Example: Dr. Smith can't have "Cardiology" assigned twice
+  //
+  doctorId    String
+  specialtyId String
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // AUDIT FIELDS
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // WHY AUDIT FIELDS ON JUNCTION TABLE?
+  // - Track when specialty was assigned to doctor
+  // - Useful for: "When did Dr. Smith become a cardiologist?"
+  // - Analytics: "How many doctors added Dermatology this year?"
+  //
+  // POTENTIAL FUTURE FIELDS:
+  // - isPrimary Boolean    → Is this the doctor's main specialty?
+  // - certifiedAt DateTime → When was certification verified?
+  // - expiresAt DateTime   → When does certification expire?
+  //
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // RELATIONS WITH REFERENTIAL ACTIONS
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // onDelete: Cascade
+  // - If doctor deleted → Remove all their specialty links
+  // - If specialty deleted → Remove from all doctors
+  //
+  // onUpdate: Cascade
+  // - If doctor.id changes → Update here automatically
+  // - If specialty.id changes → Update here automatically
+  //
+  // WHY CASCADE?
+  // Maintains referential integrity.
+  // No orphan records pointing to deleted entities.
+  //
+  doctor    Doctor    @relation(fields: [doctorId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  specialty Specialty @relation(fields: [specialtyId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // COMPOSITE PRIMARY KEY
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // @@id([doctorId, specialtyId])
+  //
+  // IN SQL:
+  // CREATE TABLE doctor_specialties (
+  //   doctor_id UUID NOT NULL,
+  //   specialty_id UUID NOT NULL,
+  //   created_at TIMESTAMP,
+  //   updated_at TIMESTAMP,
+  //   PRIMARY KEY (doctor_id, specialty_id)  ← Composite!
+  // );
+  //
+  // PRISMA QUERY WITH COMPOSITE KEY:
+  // await prisma.doctorSpecialty.delete({
+  //   where: {
+  //     doctorId_specialtyId: {     // ← Special compound key syntax
+  //       doctorId: 'doctor_123',
+  //       specialtyId: 'specialty_456'
+  //     }
+  //   }
+  // });
+  //
+  @@id([doctorId, specialtyId])
+  // ─────────────────────────────────────────────────────────────────────────────
+  // INDEXES
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // doctor_specialty_spec_idx:
+  // - Index on specialtyId alone
+  // - Speeds up: "Find all doctors with Cardiology"
+  // - Query: WHERE specialtyId = 'cardiology_id'
+  //
+  // NOTE: doctorId is already indexed as part of primary key,
+  // so we don't need a separate index for "Find all specialties for doctor X"
+  //
+  @@index([specialtyId], map: "doctor_specialty_spec_idx")
+  // Table mapping
+  @@map("doctor_specialties")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// QUICK REFERENCE: WORKING WITH SPECIALTIES
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// CREATING A SPECIALTY:
+// const specialty = await prisma.specialty.create({
+//   data: {
+//     title: 'Cardiology',
+//     icon: '/icons/heart.svg',
+//     description: 'Heart and cardiovascular system...'
+//   }
+// });
+//
+// ASSIGNING SPECIALTY TO DOCTOR:
+// await prisma.doctorSpecialty.create({
+//   data: {
+//     doctorId: 'doctor_123',
+//     specialtyId: 'specialty_456'
+//   }
+// });
+//
+// FIND ALL DOCTORS WITH A SPECIALTY:
+// const cardiologists = await prisma.doctor.findMany({
+//   where: {
+//     isDeleted: false,
+//     doctorSpecialties: {
+//       some: {
+//         specialty: {
+//           title: 'Cardiology'
+//         }
+//       }
+//     }
+//   },
+//   include: {
+//     doctorSpecialties: {
+//       include: { specialty: true }
+//     }
+//   }
+// });
+//
+// FIND ALL SPECIALTIES FOR A DOCTOR:
+// const doctorWithSpecialties = await prisma.doctor.findUnique({
+//   where: { id: 'doctor_123' },
+//   include: {
+//     doctorSpecialties: {
+//       include: { specialty: true }
+//     }
+//   }
+// });
+//
+// // Access specialties:
+// const specialtyNames = doctorWithSpecialties.doctorSpecialties
+//   .map(ds => ds.specialty.title);
+// // ['Cardiology', 'Internal Medicine']
+//
+// REMOVE SPECIALTY FROM DOCTOR:
+// await prisma.doctorSpecialty.delete({
+//   where: {
+//     doctorId_specialtyId: {
+//       doctorId: 'doctor_123',
+//       specialtyId: 'specialty_456'
+//     }
+//   }
+// });
+// ═══════════════════════════════════════════════════════════════════════════════

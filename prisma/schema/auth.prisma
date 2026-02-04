@@ -1,0 +1,113 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// Better Auth Tables
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// These tables are managed by Better Auth for authentication.
+// DO NOT modify field names without updating Better Auth configuration.
+//
+// Tables:
+//   AuthUser         -> User accounts (separate from app User model)
+//   AuthSession      -> Active user sessions
+//   AuthAccount      -> OAuth provider links (Google, etc.)
+//   AuthVerification -> Email verification, password reset, OTP tokens
+//
+// Note: These models don't use uuid(7) as Better Auth manages IDs.
+//
+// @see https://www.better-auth.com/docs/concepts/database
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// AuthUser - Better Auth user table
+/// Maps to Better Auth's built-in user model with custom role field
+model AuthUser {
+  id            String   @id @db.VarChar(36)
+  email         String   @unique @db.VarChar(255)
+  name          String   @db.VarChar(100)
+  emailVerified Boolean  @default(false)
+  image         String?  @db.VarChar(500)
+  role          UserRole @default(PATIENT)
+
+  // Audit fields
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  sessions AuthSession[]
+  accounts AuthAccount[]
+
+  // Indexes
+  @@index([email], map: "auth_user_email_idx")
+  @@index([role], map: "auth_user_role_idx")
+  @@map("auth_user")
+}
+
+/// AuthSession - Better Auth session table
+/// Manages user sessions with token-based authentication
+model AuthSession {
+  id        String   @id @db.VarChar(36)
+  userId    String   @db.VarChar(36)
+  token     String   @unique @db.VarChar(255)
+  expiresAt DateTime
+  ipAddress String?  @db.VarChar(45) // IPv6 max length
+  userAgent String?  @db.Text
+
+  // Audit fields
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations with explicit referential actions
+  user AuthUser @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  // Indexes
+  @@index([userId], map: "auth_session_user_idx")
+  @@index([token], map: "auth_session_token_idx")
+  @@index([expiresAt], map: "auth_session_expires_idx")
+  @@map("auth_session")
+}
+
+/// AuthAccount - Better Auth account table
+/// Links users to auth providers (email/password, Google, etc.)
+model AuthAccount {
+  id                    String    @id @db.VarChar(36)
+  userId                String    @db.VarChar(36)
+  accountId             String    @db.VarChar(255)
+  providerId            String    @db.VarChar(50)
+  accessToken           String?   @db.Text
+  refreshToken          String?   @db.Text
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?   @db.VarChar(500)
+  idToken               String?   @db.Text
+  password              String?   @db.VarChar(255)
+
+  // Audit fields
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations with explicit referential actions
+  user AuthUser @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  // Composite unique constraint for provider+accountId
+  @@unique([providerId, accountId])
+  // Indexes
+  @@index([userId], map: "auth_account_user_idx")
+  @@index([providerId], map: "auth_account_provider_idx")
+  @@map("auth_account")
+}
+
+/// AuthVerification - Better Auth verification table
+/// Stores verification tokens for email verification, password reset, OTP
+model AuthVerification {
+  id         String   @id @db.VarChar(36)
+  identifier String   @db.VarChar(255) // Email or phone number
+  value      String   @db.VarChar(255) // Token or OTP code
+  expiresAt  DateTime
+
+  // Audit fields
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Indexes
+  @@index([identifier], map: "auth_verification_identifier_idx")
+  @@index([expiresAt], map: "auth_verification_expires_idx")
+  @@map("auth_verification")
+}

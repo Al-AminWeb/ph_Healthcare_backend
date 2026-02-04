@@ -1,0 +1,479 @@
+// ╔══════════════════════════════════════════════════════════════════════════════╗
+// ║            SCHEDULE.PRISMA - APPOINTMENT SCHEDULING SYSTEM                   ║
+// ║                    Complete Beginner's Guide                                 ║
+// ╚══════════════════════════════════════════════════════════════════════════════╝
+//
+// 📚 WHAT IS THIS FILE?
+// ─────────────────────
+// This file defines the SCHEDULING DOMAIN - how doctors manage their availability:
+// - Schedule       → Time slot definitions (30-minute intervals)
+// - DoctorSchedule → Junction table linking doctors to their available slots
+//
+// 🎯 BUSINESS CONTEXT
+// ───────────────────
+// Imagine a doctor's calendar:
+//
+//     Monday, Jan 15, 2026
+//     ┌────────────┬───────────────────────────────┐
+//     │  9:00 AM   │ ✅ Available (Dr. Smith)      │
+//     ├────────────┼───────────────────────────────┤
+//     │  9:30 AM   │ ❌ Booked (Patient: John)     │
+//     ├────────────┼───────────────────────────────┤
+//     │ 10:00 AM   │ ✅ Available (Dr. Smith)      │
+//     ├────────────┼───────────────────────────────┤
+//     │ 10:30 AM   │ ⬜ Not Available              │
+//     └────────────┴───────────────────────────────┘
+//
+// Each row is a "Schedule" record (time slot).
+// Whether Dr. Smith is available is tracked in "DoctorSchedule".
+//
+// 📐 DESIGN PATTERN: MANY-TO-MANY WITH JUNCTION TABLE
+// ────────────────────────────────────────────────────
+// Why not just put doctorId directly on Schedule?
+//
+// WRONG APPROACH (if doctorId on Schedule):
+// - One schedule = one doctor only
+// - What if Dr. Smith AND Dr. Jones both work 9-10am Monday?
+// - Would need duplicate Schedule records
+//
+// RIGHT APPROACH (junction table):
+// - One Schedule = one time slot (reusable)
+// - Many doctors can link to same schedule
+// - Each link tracks if THAT doctor is booked
+//
+// DATABASE TABLES:
+//
+// schedules              doctor_schedules          doctors
+// ┌────────────────┐    ┌─────────────────────┐   ┌──────────────┐
+// │ id             │    │ doctorId (FK)   ────────│ id           │
+// │ startDate      │    │ scheduleId (FK) ────────│ name         │
+// │ endDate        │    │ isBooked             │  │ ...          │
+// │ startTime      │    │ createdAt            │  └──────────────┘
+// │ endTime        │    │ updatedAt            │
+// └───────┬────────┘    └─────────────────────┘
+//         │                     ▲
+//         └─────────────────────┘
+//
+// 📐 PostgreSQL TIME TYPE
+// ───────────────────────
+// PostgreSQL has a special TIME type for storing time-of-day only.
+//
+// WRONG: Storing time as string
+// startTime: "09:00:00"  // Can't do time math!
+//
+// WRONG: Storing time as full datetime
+// startTime: "2026-01-15T09:00:00Z"  // Date part is wasted space
+//
+// RIGHT: PostgreSQL TIME type
+// startTime: TIME '09:00:00'  // Only time, efficient storage
+//
+// BENEFITS OF TIME TYPE:
+// ✅ Native time comparisons: WHERE startTime < '12:00:00'
+// ✅ Time arithmetic: startTime + INTERVAL '30 minutes'
+// ✅ Proper timezone handling with TIMETZ variant
+// ✅ Only 8 bytes vs 8+ bytes for timestamp
+// ✅ Query optimizer understands it
+//
+// JAVASCRIPT HANDLING:
+// In JavaScript, TIME values come back as Date objects.
+// The date portion is set to 1970-01-01 (Unix epoch).
+//
+// const schedule = await prisma.schedule.findFirst();
+// console.log(schedule.startTime);
+// // Output: 1970-01-01T09:00:00.000Z
+// // Only the time portion (09:00:00) matters!
+//
+// WORKING WITH TIME IN CODE:
+// import { format } from 'date-fns';
+// const timeString = format(schedule.startTime, 'HH:mm');  // "09:00"
+//
+// 📐 UNIQUE CONSTRAINT PATTERN
+// ────────────────────────────
+// We use a COMPOSITE UNIQUE constraint to prevent duplicate slots:
+//
+// @@unique([startDate, startTime, endTime])
+//
+// This means: "No two schedules can have the same date + start + end time"
+//
+// ALLOWED:
+// Schedule 1: Jan 15, 9:00-9:30 ✅
+// Schedule 2: Jan 15, 9:30-10:00 ✅  (different time)
+// Schedule 3: Jan 16, 9:00-9:30 ✅  (different date)
+//
+// NOT ALLOWED:
+// Schedule 1: Jan 15, 9:00-9:30 ✅
+// Schedule 2: Jan 15, 9:00-9:30 ❌  (duplicate!)
+//
+// 📖 DOCUMENTATION:
+// - Many-to-Many: https://www.prisma.io/docs/orm/prisma-schema/data-model/relations/many-to-many-relations
+// - PostgreSQL TIME: https://www.postgresql.org/docs/current/datatype-datetime.html
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ┌──────────────────────────────────────────────────────────────────────────────┐
+// │                            SCHEDULE MODEL                                    │
+// │              Time slot definition for appointments                           │
+// └──────────────────────────────────────────────────────────────────────────────┘
+//
+// PURPOSE:
+// Represents a bookable time slot (typically 30 minutes).
+// Schedules are SHARED - multiple doctors can be available at the same time.
+//
+// LIFECYCLE:
+// 1. Admin creates schedule slots (9:00, 9:30, 10:00, etc.)
+// 2. Doctors link themselves via DoctorSchedule
+// 3. Patients book appointments (creates Appointment, marks DoctorSchedule.isBooked)
+// 4. After appointment, slot becomes available again
+//
+/// Schedule - Time slot definition for appointments
+/// Represents a 30-minute interval that can be booked
+///
+/// @example Creating a schedule for 9:00 AM - 9:30 AM on Jan 15, 2026:
+///   {
+///     startDate: new Date('2026-01-15'),
+///     endDate: new Date('2026-01-15'),
+///     startTime: new Date('1970-01-01T09:00:00Z'),  // Only time portion matters
+///     endTime: new Date('1970-01-01T09:30:00Z')     // Only time portion matters
+///   }
+///
+/// @note PostgreSQL TIME type stores time-of-day without date component.
+///       In JavaScript, you'll work with Date objects but only the time portion
+///       is stored in the database. Use date-fns or dayjs for time manipulation.
+model Schedule {
+  // ─────────────────────────────────────────────────────────────────────────────
+  // PRIMARY KEY: UUID v7 (time-ordered)
+  // ─────────────────────────────────────────────────────────────────────────────
+  id String @id @default(uuid(7))
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // DATE RANGE: When this schedule is valid
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // @db.Date → PostgreSQL DATE type (YYYY-MM-DD only, no time)
+  //
+  // WHY SEPARATE startDate/endDate?
+  // - Single day: startDate = endDate = Jan 15
+  // - Multiple days: startDate = Jan 15, endDate = Jan 20 (repeating slot)
+  //
+  // SINGLE DAY EXAMPLE:
+  // { startDate: '2026-01-15', endDate: '2026-01-15' }
+  // = This slot exists ONLY on January 15th
+  //
+  // DATE RANGE EXAMPLE (for recurring schedules):
+  // { startDate: '2026-01-15', endDate: '2026-01-31' }
+  // = This slot repeats every day from Jan 15-31
+  //
+  // NOTE: In JavaScript, dates are received as:
+  // schedule.startDate = new Date('2026-01-15T00:00:00.000Z')
+  //
+  startDate DateTime @db.Date
+  endDate   DateTime @db.Date
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // TIME SLOTS: PostgreSQL native TIME type
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // @db.Time → PostgreSQL TIME type (HH:MM:SS only, no date)
+  //
+  // WHY TIME TYPE (not String or Timestamp)?
+  // ✅ Native time comparisons: WHERE startTime < '12:00:00'
+  // ✅ Time arithmetic: startTime + INTERVAL '30 minutes'
+  // ✅ Better query optimization (index-friendly)
+  // ✅ Smaller storage (8 bytes)
+  //
+  // STORAGE FORMAT:
+  // PostgreSQL stores: TIME '09:30:00'
+  // JavaScript receives: Date('1970-01-01T09:30:00.000Z')
+  // Only the time portion matters!
+  //
+  // WORKING WITH TIME IN CODE:
+  // // Creating a time value for 9:30 AM:
+  // const startTime = new Date('1970-01-01T09:30:00.000Z');
+  //
+  // // Extracting time from result:
+  // const hours = schedule.startTime.getUTCHours();   // 9
+  // const minutes = schedule.startTime.getUTCMinutes(); // 30
+  //
+  // // Using date-fns for formatting:
+  // import { format } from 'date-fns';
+  // const timeStr = format(schedule.startTime, 'HH:mm'); // "09:30"
+  //
+  // TYPICAL 30-MINUTE SLOTS:
+  // startTime: 09:00, endTime: 09:30
+  // startTime: 09:30, endTime: 10:00
+  // startTime: 10:00, endTime: 10:30
+  //
+  startTime DateTime @db.Time
+  endTime   DateTime @db.Time
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // AUDIT FIELDS
+  // ─────────────────────────────────────────────────────────────────────────────
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  isDeleted Boolean   @default(false)
+  deletedAt DateTime?
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // RELATIONS
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // doctorSchedules: Doctors available at this time slot
+  // One schedule can have MANY doctors (via junction table)
+  //
+  // appointment: The booking for this slot (optional)
+  // Only ONE appointment per schedule (1:1)
+  // Optional because slot might not be booked yet
+  //
+  doctorSchedules DoctorSchedule[]
+  appointment     Appointment?
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // UNIQUE CONSTRAINT: Prevent duplicate time slots
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // @@unique([startDate, startTime, endTime])
+  //
+  // WHAT IT PREVENTS:
+  // Two schedules with same date AND same time range
+  //
+  // ALLOWED:
+  // { startDate: Jan 15, startTime: 9:00, endTime: 9:30 } ✅
+  // { startDate: Jan 15, startTime: 9:30, endTime: 10:00 } ✅ Different time
+  // { startDate: Jan 16, startTime: 9:00, endTime: 9:30 } ✅ Different date
+  //
+  // REJECTED:
+  // { startDate: Jan 15, startTime: 9:00, endTime: 9:30 } Already exists!
+  //
+  @@unique([startDate, startTime, endTime], name: "unique_schedule_slot")
+  // ─────────────────────────────────────────────────────────────────────────────
+  // INDEXES: Query performance optimization
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // schedule_date_range_idx:
+  // - Composite index on startDate + endDate
+  // - Speeds up: "Find schedules between Jan 15 and Jan 31"
+  // - Query: WHERE startDate >= '2026-01-15' AND endDate <= '2026-01-31'
+  //
+  // schedule_time_range_idx:
+  // - Composite index on startTime + endTime
+  // - Speeds up: "Find morning slots" (9am-12pm)
+  // - Query: WHERE startTime >= '09:00' AND endTime <= '12:00'
+  //
+  // schedule_deleted_idx:
+  // - Essential for soft delete filtering
+  // - Every query should filter: WHERE isDeleted = false
+  //
+  @@index([startDate, endDate], map: "schedule_date_range_idx")
+  @@index([startTime, endTime], map: "schedule_time_range_idx")
+  @@index([isDeleted], map: "schedule_deleted_idx")
+  // Table mapping: Prisma "Schedule" → PostgreSQL "schedules"
+  @@map("schedules")
+}
+
+// ┌──────────────────────────────────────────────────────────────────────────────┐
+// │                         DOCTORSCHEDULE MODEL                                 │
+// │              Junction table for Doctor-Schedule relationship                 │
+// └──────────────────────────────────────────────────────────────────────────────┘
+//
+// PURPOSE:
+// Links doctors to their available time slots.
+// Tracks whether each doctor-schedule combination is booked.
+//
+// WHY A JUNCTION TABLE?
+// ─────────────────────
+// Without junction table (WRONG):
+// Doctor 1 available 9-10am → Can't share with Doctor 2
+//
+// With junction table (RIGHT):
+// Schedule: 9-10am slot (shared definition)
+// DoctorSchedule: Dr. Smith → 9-10am (not booked)
+// DoctorSchedule: Dr. Jones → 9-10am (booked)
+//
+// DATABASE REPRESENTATION:
+//
+// doctor_schedules
+// ┌──────────────┬───────────────┬──────────┐
+// │ doctorId     │ scheduleId    │ isBooked │
+// ├──────────────┼───────────────┼──────────┤
+// │ dr_smith_123 │ slot_9am_456  │ false    │  ← Dr. Smith available
+// │ dr_jones_789 │ slot_9am_456  │ true     │  ← Dr. Jones booked
+// │ dr_smith_123 │ slot_10am_012 │ true     │  ← Dr. Smith booked
+// └──────────────┴───────────────┴──────────┘
+//
+// COMPOSITE PRIMARY KEY:
+// ─────────────────────
+// Primary key is (doctorId + scheduleId) together.
+// This automatically prevents duplicate entries.
+//
+// BOOKING FLOW:
+// ─────────────
+// 1. Patient selects doctor + time slot
+// 2. Check: SELECT * FROM doctor_schedules WHERE ... AND isBooked = false
+// 3. If available: UPDATE doctor_schedules SET isBooked = true
+// 4. Create Appointment record
+// 5. Process payment
+//
+/// DoctorSchedule - Junction table for Doctor-Schedule relationship
+/// Tracks which doctors are available at which time slots
+model DoctorSchedule {
+  // ─────────────────────────────────────────────────────────────────────────────
+  // COMPOSITE PRIMARY KEY FIELDS
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // These two fields TOGETHER form the primary key.
+  // See @@id([doctorId, scheduleId]) at the bottom.
+  //
+  // WHAT THIS MEANS:
+  // - No separate 'id' column needed
+  // - Combination must be unique
+  // - Can't have two records with same doctor + schedule
+  //
+  doctorId   String
+  scheduleId String
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // BOOKING STATUS
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // @default(false) → New doctor-schedule links start as available
+  //
+  // STATES:
+  // false = Doctor is available at this time
+  // true  = Doctor has a booking at this time
+  //
+  // UPDATED WHEN:
+  // - Appointment created → isBooked = true
+  // - Appointment cancelled → isBooked = false
+  //
+  isBooked Boolean @default(false)
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // AUDIT FIELDS
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // WHY AUDIT FIELDS ON JUNCTION TABLE?
+  // - Track when doctor added this availability
+  // - Debug booking issues
+  // - Analytics: When do doctors add availability?
+  //
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // RELATIONS WITH REFERENTIAL ACTIONS
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // @relation(fields: [doctorId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  //
+  // BREAKDOWN:
+  // - fields: [doctorId]    → This table's foreign key column
+  // - references: [id]      → Doctor table's primary key
+  // - onDelete: Cascade     → If doctor deleted, delete all their schedules
+  // - onUpdate: Cascade     → If doctor.id changes, update here too
+  //
+  // CASCADE BEHAVIOR:
+  // DELETE FROM doctors WHERE id = 'dr_smith';
+  // → Automatically: DELETE FROM doctor_schedules WHERE doctorId = 'dr_smith';
+  //
+  // This prevents orphan records (schedules pointing to non-existent doctors).
+  //
+  doctor   Doctor   @relation(fields: [doctorId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  schedule Schedule @relation(fields: [scheduleId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // COMPOSITE PRIMARY KEY
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // @@id([doctorId, scheduleId])
+  //
+  // WHY COMPOSITE KEY?
+  // - No need for separate UUID column
+  // - Automatically enforces uniqueness
+  // - More efficient queries (natural key)
+  //
+  // IN SQL:
+  // CREATE TABLE doctor_schedules (
+  //   doctor_id UUID,
+  //   schedule_id UUID,
+  //   is_booked BOOLEAN,
+  //   PRIMARY KEY (doctor_id, schedule_id)  ← Composite!
+  // );
+  //
+  @@id([doctorId, scheduleId])
+  // ─────────────────────────────────────────────────────────────────────────────
+  // INDEXES FOR COMMON QUERIES
+  // ─────────────────────────────────────────────────────────────────────────────
+  //
+  // doctor_schedule_booking_idx:
+  // - Composite index: doctorId + isBooked
+  // - Use case: "Find Dr. Smith's available slots"
+  // - Query: WHERE doctorId = 'x' AND isBooked = false
+  //
+  // doctor_schedule_schedule_idx:
+  // - Index on scheduleId alone
+  // - Use case: "Find all doctors available at 9am slot"
+  // - Query: WHERE scheduleId = 'slot_9am'
+  //
+  // doctor_schedule_booked_idx:
+  // - Index on isBooked alone
+  // - Use case: "Count total bookings" or "Find all available slots"
+  //
+  @@index([doctorId, isBooked], map: "doctor_schedule_booking_idx")
+  @@index([scheduleId], map: "doctor_schedule_schedule_idx")
+  @@index([isBooked], map: "doctor_schedule_booked_idx")
+  // Table mapping
+  @@map("doctor_schedules")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// QUICK REFERENCE: WORKING WITH SCHEDULES
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// CREATING A SCHEDULE:
+// const schedule = await prisma.schedule.create({
+//   data: {
+//     startDate: new Date('2026-01-15'),
+//     endDate: new Date('2026-01-15'),
+//     startTime: new Date('1970-01-01T09:00:00Z'),  // 9:00 AM
+//     endTime: new Date('1970-01-01T09:30:00Z'),    // 9:30 AM
+//   }
+// });
+//
+// DOCTOR ADDING AVAILABILITY:
+// await prisma.doctorSchedule.create({
+//   data: {
+//     doctorId: 'doctor_123',
+//     scheduleId: schedule.id,
+//     isBooked: false
+//   }
+// });
+//
+// FINDING AVAILABLE SLOTS FOR A DOCTOR:
+// const available = await prisma.doctorSchedule.findMany({
+//   where: {
+//     doctorId: 'doctor_123',
+//     isBooked: false,
+//     schedule: {
+//       startDate: { gte: new Date('2026-01-15') },
+//       isDeleted: false
+//     }
+//   },
+//   include: { schedule: true }
+// });
+//
+// BOOKING A SLOT:
+// await prisma.$transaction([
+//   prisma.doctorSchedule.update({
+//     where: { doctorId_scheduleId: { doctorId: 'x', scheduleId: 'y' } },
+//     data: { isBooked: true }
+//   }),
+//   prisma.appointment.create({
+//     data: {
+//       doctorId: 'x',
+//       patientId: 'patient_123',
+//       scheduleId: 'y',
+//       status: 'SCHEDULED'
+//     }
+//   })
+// ]);
+// ═══════════════════════════════════════════════════════════════════════════════
